@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhishScan</title>
+<style>
+:root{--bg:#f4f6f9;--card:#fff;--text:#1c2430;--muted:#6b7686;--line:#e3e7ee;--safe:#1b8a5a;--warn:#c27a0a;--bad:#c93c3c;--grey:#5b6b82}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.5}
+main{max-width:860px;margin:0 auto;padding:32px 16px 64px}
+h1{margin:0 0 4px}
+h2{font-size:18px;margin:32px 0 12px}
+.sub,.muted{color:var(--muted)}
+.row{display:flex;gap:8px;margin:20px 0 8px}
+input{flex:1;padding:12px 14px;border:1px solid var(--line);border-radius:8px;font-size:16px}
+button{padding:12px 22px;border:0;border-radius:8px;background:#2257d6;color:#fff;font-size:16px;cursor:pointer}
+button:disabled{opacity:.6;cursor:wait}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-top:16px}
+.verdict{display:flex;justify-content:space-between;align-items:center;font-weight:600;font-size:22px}
+.verdict.phishing{color:var(--bad)}.verdict.suspicious{color:var(--warn)}.verdict.likely_safe{color:var(--safe)}.verdict.inconclusive{color:var(--grey)}
+.score{font-size:15px;color:var(--muted);font-weight:500}
+.bar{height:8px;background:var(--line);border-radius:4px;margin:12px 0;overflow:hidden}
+.fill{height:100%}
+.fill.phishing{background:var(--bad)}.fill.suspicious{background:var(--warn)}.fill.likely_safe{background:var(--safe)}.fill.inconclusive{background:var(--grey)}
+.finding{border-top:1px solid var(--line);padding:12px 0}
+.finding:first-child{border-top:0}
+.ftitle{display:flex;gap:8px;align-items:center;font-weight:600}
+.pill{font-size:11px;text-transform:uppercase;padding:2px 8px;border-radius:99px;color:#fff;letter-spacing:.04em}
+.pill.high{background:var(--bad)}.pill.medium{background:var(--warn)}.pill.low{background:var(--grey)}.pill.info{background:var(--safe)}
+.pts{margin-left:auto;color:var(--muted);font-weight:500}
+.fdetail{color:var(--muted);font-size:14px;margin-top:2px}
+.cat{font-size:12px;color:var(--muted);text-transform:uppercase;margin-top:4px}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:14px}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);word-break:break-all}
+th{background:#fafbfd;color:var(--muted);font-weight:600}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.chip{padding:4px 12px;border-radius:99px;background:var(--card);border:1px solid var(--line);font-size:13px}
+.note{background:#fff7e6;border:1px solid #f1d9a5;border-radius:8px;padding:10px 12px;margin-top:10px;font-size:14px}
+</style>
+</head>
+<body>
+<main>
+<h1>PhishScan</h1>
+<p class="sub">Checks the URL, the domain, and the page content before reaching a verdict.</p>
+<div class="row">
+<input id="url" type="text" placeholder="https://example.com/login" autocomplete="off">
+<button id="scan">Analyze</button>
+</div>
+<div id="status" class="muted"></div>
+<div id="result"></div>
+<h2>Recent scans</h2>
+<div id="counts" class="chips"></div>
+<table id="history"><thead><tr><th>URL</th><th>Verdict</th><th>Score</th><th>Time</th></tr></thead><tbody></tbody></table>
+<h2>Model performance (URL model)</h2>
+<table id="metrics"><thead><tr><th>Model</th><th>Accuracy</th><th>Precision</th><th>Recall</th><th>F1</th></tr></thead><tbody></tbody></table>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+};
+const LABELS = { phishing: "Phishing detected", suspicious: "Suspicious", likely_safe: "Likely safe", inconclusive: "Inconclusive" };
+
+function findingNode(f) {
+  const row = el("div", "finding");
+  const title = el("div", "ftitle");
+  title.append(el("span", "pill " + f.severity, f.severity === "info" ? "trust" : f.severity), el("span", "", f.title), el("span", "pts", (f.points > 0 ? "+" : "") + f.points));
+  row.append(title, el("div", "fdetail", f.detail), el("div", "cat", f.category));
+  return row;
+}
+
+function section(heading, items) {
+  const card = el("div", "card");
+  card.append(el("strong", "", heading));
+  items.forEach((f) => card.append(findingNode(f)));
+  return card;
+}
+
+function render(d) {
+  const box = $("result");
+  box.replaceChildren();
+  const head = el("div", "card");
+  const verdict = el("div", "verdict " + d.verdict);
+  verdict.append(el("span", "", LABELS[d.verdict]), el("span", "score", "Risk score " + d.score + "/100"));
+  const bar = el("div", "bar");
+  const fill = el("div", "fill " + d.verdict);
+  fill.style.width = d.score + "%";
+  bar.append(fill);
+  head.append(verdict, bar, el("div", "", d.summary));
+  if (d.page && d.page.final_url) {
+    head.append(el("div", "muted", "Final address: " + d.page.final_url));
+    if (d.page.title) head.append(el("div", "muted", "Page title: " + d.page.title));
+  }
+  d.notes.forEach((n) => head.append(el("div", "note", n)));
+  box.append(head);
+  if (d.findings.length) box.append(section("Why this result: warning signs found", d.findings));
+  if (d.trust.length) box.append(section("Trust signals", d.trust));
+  if (!d.findings.length) box.append(el("div", "card muted", "No warning signs were found in any layer."));
+}
+
+async function scan() {
+  const url = $("url").value.trim();
+  if (!url) return;
+  $("scan").disabled = true;
+  $("status").textContent = "Analyzing URL, domain and page content. This can take up to 30 seconds...";
+  $("result").replaceChildren();
+  try {
+    const res = await fetch("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Request failed");
+    $("status").textContent = "";
+    render(data);
+    loadHistory();
+  } catch (e) {
+    $("status").textContent = e.message;
+  }
+  $("scan").disabled = false;
+}
+
+async function loadHistory() {
+  const data = await (await fetch("/api/history")).json();
+  const body = $("history").querySelector("tbody");
+  body.replaceChildren();
+  data.recent.forEach((r) => {
+    const tr = el("tr");
+    [r.url, LABELS[r.verdict] || r.verdict, r.score, r.created].forEach((v) => tr.append(el("td", "", String(v))));
+    body.append(tr);
+  });
+  $("counts").replaceChildren();
+  Object.entries(data.counts).forEach(([k, v]) => $("counts").append(el("span", "chip", (LABELS[k] || k) + ": " + v)));
+}
+
+async function loadMetrics() {
+  const data = await (await fetch("/api/metrics")).json();
+  const body = $("metrics").querySelector("tbody");
+  Object.entries(data).forEach(([name, m]) => {
+    const tr = el("tr");
+    [name.replace("_", " "), m.accuracy, m.precision, m.recall, m.f1].forEach((v) => tr.append(el("td", "", String(v))));
+    body.append(tr);
+  });
+}
+
+$("scan").addEventListener("click", scan);
+$("url").addEventListener("keydown", (e) => { if (e.key === "Enter") scan(); });
+loadHistory();
+loadMetrics();
+</script>
+</body>
+</html>
