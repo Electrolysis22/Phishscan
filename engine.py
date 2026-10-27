@@ -10,12 +10,14 @@ from features import extract, normalize, reg_domain
 
 MODEL = joblib.load("model/model.joblib")
 PASSWORD_TYPE = re.compile(r"^password$", re.I)
+SCHEME_RE = re.compile(r"^https?://", re.I)
 
 ERRORS = {
-    "unresolved": "The domain does not resolve, so the page could not be inspected.",
+    "unresolved": "The domain does not resolve, so the page could not be opened.",
     "blocked": "The address points to a private or internal network and was not fetched for safety.",
-    "unreachable": "The site could not be reached (it may be offline or blocking automated requests).",
-    "not_html": "The address did not return an HTML page.",
+    "unreachable": "The site could not be reached (it may be offline or blocking automated visitors).",
+    "http_error": "The site refused to show its page to an automated visitor, which many large sites do.",
+    "not_html": "The address did not return a web page.",
     "too_many_redirects": "The link redirected too many times to follow.",
 }
 
@@ -37,7 +39,7 @@ def age_phrase(days):
     return ", ".join(parts)
 
 
-def decide(findings, fetched):
+def decide(findings, fetched, age_days):
     positive = sum(f["points"] for f in findings if f["points"] > 0)
     negative = sum(f["points"] for f in findings if f["points"] < 0)
     high_content = [f for f in findings if f["category"] == "content" and f["severity"] == "high"]
@@ -51,17 +53,24 @@ def decide(findings, fetched):
         score = 70
         boosted = True
     categories = {f["category"] for f in findings if f["points"] > 0}
+    limited = False
     if fetched and score >= 60 and (len(categories) >= 2 or len(high_content) >= 2):
+        verdict = "phishing"
+    elif not fetched and score >= 70 and len(categories) >= 2:
         verdict = "phishing"
     elif score >= 30:
         verdict = "suspicious"
     elif fetched:
         verdict = "likely_safe"
+    elif age_days is not None and age_days >= 365 and "url" not in categories:
+        verdict = "likely_safe"
+        limited = True
     else:
         verdict = "inconclusive"
     return {
         "verdict": verdict,
         "score": score,
+        "limited": limited,
         "trust_ignored": trust_ignored,
         "boosted": boosted,
         "warning_points": positive,
@@ -69,15 +78,20 @@ def decide(findings, fetched):
     }
 
 
-def summarize(verdict, findings):
+def summarize(verdict, findings, fetched, limited):
     top = [f["title"] for f in sorted(findings, key=lambda f: -f["points"]) if f["points"] > 0][:3]
     if verdict == "phishing":
-        return "This looks like a fake (phishing) site. Main reasons: " + "; ".join(top) + "."
+        text = "This looks like a fake (phishing) site. Main reasons: " + "; ".join(top) + "."
+        if not fetched:
+            text += " This is based on the link and domain only, because the page could not be opened."
+        return text
     if verdict == "suspicious":
         return "This site is suspicious, but the evidence is not strong enough to call it fake. Main reasons: " + "; ".join(top) + "."
+    if verdict == "likely_safe" and limited:
+        return "This looks legitimate based on the link and its domain, but the page itself could not be opened, so it was not checked in full."
     if verdict == "likely_safe":
         return "This looks like a legitimate site. No strong warning signs were found. No automatic check is a guarantee, so stay careful with passwords and payments."
-    return "The page could not be inspected, so no firm conclusion is possible. Only the link and domain were checked, and nothing alarming was found there."
+    return "The page could not be opened, and the link and domain alone do not give enough evidence to say whether it is fake or real."
 
 
 def passed_checks(url, ml_prob, result, age_days, soup, findings):
@@ -106,16 +120,24 @@ def passed_checks(url, ml_prob, result, age_days, soup, findings):
 
 
 def analyze(raw):
-    url = normalize(raw)
+    cleaned = raw.strip()
+    had_scheme = bool(SCHEME_RE.match(cleaned))
+    url = normalize(cleaned)
     host = (urlparse(url).hostname or "").lower()
     if "." not in host:
         raise ValueError("invalid url")
 
+    result = fetch(url)
+    if result["html"] is None and result["error"] == "unreachable" and not had_scheme and url.startswith("https://"):
+        http_url = "http://" + url[len("https://"):]
+        retry = fetch(http_url)
+        if retry["html"] is not None:
+            url, result = http_url, retry
+    fetched = result["html"] is not None
+
     ml_prob = float(MODEL.predict_proba(pd.DataFrame([extract(url)]))[0][1])
     findings = url_findings(url, ml_prob)
 
-    result = fetch(url)
-    fetched = result["html"] is not None
     final_url = result["final_url"]
     final_rd = reg_domain((urlparse(final_url).hostname or "").lower())
     created = domain_created(final_rd)
@@ -135,13 +157,13 @@ def analyze(raw):
             "forms": len(soup.find_all("form")),
         }
 
-    decision = decide(findings, fetched)
+    decision = decide(findings, fetched, age_days)
     verdict = decision["verdict"]
 
     notes = []
     if not fetched:
-        notes.append(ERRORS.get(result["error"], "The page could not be inspected."))
-        notes.append("Without page content the verdict cannot exceed Suspicious.")
+        notes.append(ERRORS.get(result["error"], "The page could not be opened."))
+        notes.append("The result rests on the link and domain checks only.")
     if decision["trust_ignored"]:
         notes.append("Trust credit was not applied because strong content evidence was found.")
     if decision["boosted"]:
@@ -151,7 +173,7 @@ def analyze(raw):
         "url": url,
         "verdict": verdict,
         "score": decision["score"],
-        "summary": summarize(verdict, findings),
+        "summary": summarize(verdict, findings, fetched, decision["limited"]),
         "findings": sorted([f for f in findings if f["points"] > 0], key=lambda f: -f["points"]),
         "passed": passed_checks(url, ml_prob, result, age_days, soup, findings),
         "breakdown": {

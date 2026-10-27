@@ -11,7 +11,11 @@ import whois
 
 from features import IP_RE, KEYWORDS, SHORTENERS, reg_domain, subdomain_count
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; PhishScan/1.0; academic research)"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 MAX_BYTES = 1500000
 ALLOW_PRIVATE = os.environ.get("ALLOW_PRIVATE") == "1"
 REDIRECT_CODES = {301, 302, 303, 307, 308}
@@ -76,8 +80,8 @@ def fetch(url):
     current = url
     ssl_failed = False
 
-    def fail(error):
-        return {"html": None, "chain": chain, "ssl_failed": ssl_failed, "error": error, "final_url": current}
+    def fail(error, status=None):
+        return {"html": None, "chain": chain, "ssl_failed": ssl_failed, "error": error, "final_url": current, "status": status}
 
     for _ in range(8):
         status = host_status(current)
@@ -97,9 +101,13 @@ def fetch(url):
             chain.append(current)
             r.close()
             continue
+        if r.status_code >= 400:
+            code = r.status_code
+            r.close()
+            return fail("http_error", code)
         if "html" not in r.headers.get("Content-Type", "").lower():
             r.close()
-            return fail("not_html")
+            return fail("not_html", r.status_code)
         body = b""
         for part in r.iter_content(65536):
             body += part

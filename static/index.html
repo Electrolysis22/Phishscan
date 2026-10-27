@@ -81,7 +81,11 @@ button.primary:disabled{opacity:.6;cursor:wait}
 .grid .card{margin-top:0}
 .card h3{margin:0 0 6px;font-size:17px;color:var(--text);font-weight:700}
 .card p{margin:0;color:var(--muted);font-size:15px}
-.verdict{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;font-family:var(--font-head);font-weight:700;font-size:24px}
+.card.phishing{border-left:6px solid var(--bad)}
+.card.suspicious{border-left:6px solid var(--warn)}
+.card.likely_safe{border-left:6px solid var(--safe)}
+.card.inconclusive{border-left:6px solid var(--grey)}
+.verdict{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;font-family:var(--font-head);font-weight:800;font-size:26px;line-height:1.2}
 .verdict.phishing{color:var(--bad-fg)}.verdict.suspicious{color:var(--warn-fg)}.verdict.likely_safe{color:var(--safe-fg)}.verdict.inconclusive{color:var(--grey-fg)}
 .score{font-size:15px;color:var(--text);font-weight:600}
 .score small{color:var(--muted);font-weight:500}
@@ -93,7 +97,7 @@ button.primary:disabled{opacity:.6;cursor:wait}
 .dot.g{background:var(--safe)}.dot.y{background:var(--warn)}.dot.r{background:var(--bad)}
 .summary{font-size:16px}
 .breakdown{margin-top:8px;font-size:13px;color:var(--muted)}
-.domainbox{margin-top:14px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--th);font-size:14px}
+.domainbox{margin-top:6px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--th);font-size:14px}
 .domainbox div+div{margin-top:4px}
 .domainbox .age{font-weight:700}
 .domainbox .age.new{color:var(--bad-fg)}
@@ -117,7 +121,7 @@ th{background:var(--th);color:var(--muted);font-weight:600}
 .note{background:var(--note-bg);border:1px solid var(--note-line);color:var(--note-text);border-radius:8px;padding:10px 12px;margin-top:10px;font-size:14px}
 .legend{display:grid;gap:10px;margin-top:8px}
 .legend div{display:flex;gap:10px;align-items:baseline}
-.legend strong{min-width:170px}
+.legend strong{min-width:190px}
 .c-bad{color:var(--bad-fg)}.c-warn{color:var(--warn-fg)}.c-safe{color:var(--safe-fg)}.c-grey{color:var(--grey-fg)}
 ul{margin:8px 0 0;padding-left:20px;color:var(--muted)}
 li{margin:4px 0}
@@ -142,8 +146,8 @@ footer{text-align:center;color:var(--muted);font-size:13px;padding:0 16px 32px}
 <main>
 <section id="page-home" class="page active">
 <div class="hero">
-<h1>Check a link before you trust it</h1>
-<p>PhishScan looks at the address, the domain and what the page actually does, then tells you whether it looks legitimate or fake, and exactly why.</p>
+<h1>Is this website fake or real?</h1>
+<p>PhishScan checks the address, the domain and what the page actually does, then tells you whether it looks fake or legitimate, and exactly why.</p>
 <button class="primary" data-go="analyze">Start analyzing</button>
 </div>
 <div class="grid">
@@ -152,7 +156,7 @@ footer{text-align:center;color:var(--muted);font-size:13px;padding:0 16px 32px}
 <div class="card"><h3>3. The page</h3><p>Reads the page itself: where password forms send data, whether it imitates a known brand, hidden frames and disguised code.</p></div>
 </div>
 <div class="card">
-<h3>Why not just check the web address?</h3>
+<h3>Why not just click the web address?</h3>
 <p>Phishing pages often sit on real, trusted domains, such as hacked websites and free hosting. So a safe-looking address is never enough. PhishScan weighs what the page does, and every point of the score comes with a reason you can read.</p>
 </div>
 </section>
@@ -179,18 +183,18 @@ footer{text-align:center;color:var(--muted);font-size:13px;padding:0 16px 32px}
 <li>Domain checks look at domain age, certificate validity and redirects.</li>
 <li>Page checks look at password forms, brand impersonation, hidden iframes and obfuscated code.</li>
 <li>Every warning sign adds points to a risk score from 0 to 100, and every point is listed with its reason.</li>
-<li>A page is only called phishing when the score is high and the evidence comes from more than one layer, or from two strong content findings.</li>
-<li>If the page cannot be downloaded, the result cannot be higher than Suspicious.</li>
+<li>A page is called fake only when the score is high and the evidence comes from more than one layer, or from two strong findings on the page itself.</li>
+<li>If the page cannot be opened, the result rests on the link and domain alone and says so.</li>
 </ul>
 </div>
 
 <div class="card">
 <h3>What the results mean</h3>
 <div class="legend">
-<div><strong class="c-bad">Phishing (fake site)</strong><span class="muted">Strong evidence from several checks. Do not enter any information.</span></div>
-<div><strong class="c-warn">Suspicious</strong><span class="muted">Some warning signs, but not enough to be sure. Be careful.</span></div>
-<div><strong class="c-safe">Likely legitimate</strong><span class="muted">No strong warning signs found. This is not a guarantee.</span></div>
-<div><strong class="c-grey">Inconclusive</strong><span class="muted">The page could not be inspected, so only the link and domain were checked.</span></div>
+<div><strong class="c-bad">Fake website (phishing)</strong><span class="muted">Strong evidence from several checks. Do not enter any information.</span></div>
+<div><strong class="c-warn">Suspicious website</strong><span class="muted">Some warning signs, but not enough to be sure. Be careful.</span></div>
+<div><strong class="c-safe">Looks legitimate</strong><span class="muted">No strong warning signs found. This is not a guarantee.</span></div>
+<div><strong class="c-grey">Could not decide</strong><span class="muted">The page could not be opened and the link and domain alone were not enough.</span></div>
 </div>
 <p style="margin-top:12px">Risk score: 0 to 29 is low risk, 30 to 59 is medium risk, and 60 to 100 is high risk.</p>
 </div>
@@ -209,10 +213,11 @@ footer{text-align:center;color:var(--muted);font-size:13px;padding:0 16px 32px}
 <h3>Limitations</h3>
 <ul>
 <li>Pages that build their content with JavaScript show less evidence, because only the raw page text is read.</li>
+<li>Some sites refuse automated visitors, so only the link and domain can be checked.</li>
 <li>Some phishing kits show a harmless page to automated visitors.</li>
 <li>Some domain endings do not publish registration dates, so the domain age may be unavailable.</li>
 <li>The scoring weights are hand-tuned and are checked against test data, not proven.</li>
-<li>A "Likely legitimate" result lowers risk but never removes it.</li>
+<li>A "Looks legitimate" result lowers risk but never removes it.</li>
 </ul>
 </div>
 
@@ -231,7 +236,12 @@ const el = (tag, cls, text) => {
   if (text !== undefined) n.textContent = text;
   return n;
 };
-const LABELS = { phishing: "Phishing (fake site)", suspicious: "Suspicious", likely_safe: "Likely legitimate", inconclusive: "Inconclusive" };
+const HEADLINES = {
+  phishing: "🚫 Fake website (phishing)",
+  suspicious: "⚠️ Suspicious website",
+  likely_safe: "✅ Looks legitimate",
+  inconclusive: "❔ Could not decide"
+};
 const PAGES = ["home", "analyze", "about"];
 const THEME_KEY = "phishscan-theme";
 
@@ -315,6 +325,12 @@ function domainBox(info) {
   return box;
 }
 
+function domainCard(info) {
+  const card = el("div", "card");
+  card.append(el("strong", "cardtitle", "Website history (domain details)"), domainBox(info));
+  return card;
+}
+
 function findingNode(f) {
   const row = el("div", "finding");
   const title = el("div", "ftitle");
@@ -345,11 +361,11 @@ function render(d) {
   const box = $("result");
   box.replaceChildren();
 
-  const head = el("div", "card");
+  const head = el("div", "card " + d.verdict);
   const verdict = el("div", "verdict " + d.verdict);
   const score = el("span", "score");
   score.append(document.createTextNode("Risk score " + d.score + "/100 "), el("small", "", "· " + bandText(d.score)));
-  verdict.append(el("span", "", LABELS[d.verdict]), score);
+  verdict.append(el("span", "", HEADLINES[d.verdict]), score);
   const bar = el("div", "bar");
   const fill = el("div", "fill " + d.verdict);
   fill.style.width = d.score + "%";
@@ -362,10 +378,10 @@ function render(d) {
     guide.append(item);
   });
 
-  head.append(verdict, bar, guide, el("div", "summary", d.summary), el("div", "breakdown", breakdownText(d.breakdown, d.score)), domainBox(d.domain));
+  head.append(verdict, bar, guide, el("div", "summary", d.summary), el("div", "breakdown", breakdownText(d.breakdown, d.score)));
   if (d.page && d.page.final_url) {
-    head.append(el("div", "muted", "Final address: " + d.page.final_url));
-    if (d.page.title) head.append(el("div", "muted", "Page title: " + d.page.title));
+    head.append(el("div", "breakdown", "Final address: " + d.page.final_url));
+    if (d.page.title) head.append(el("div", "breakdown", "Page title: " + d.page.title));
   }
   d.notes.forEach((n) => head.append(el("div", "note", n)));
   box.append(head);
@@ -375,6 +391,8 @@ function render(d) {
   const good = d.passed.length ? okCard(h.good, d.passed) : null;
   const order = d.verdict === "likely_safe" ? [good, bad] : [bad, good];
   order.forEach((c) => { if (c) box.append(c); });
+
+  box.append(domainCard(d.domain));
 }
 
 async function scan() {
@@ -388,7 +406,10 @@ async function scan() {
     const text = await res.text();
     let data = null;
     try { data = JSON.parse(text); } catch (e) { data = null; }
-    if (!data) throw new Error("The server returned an empty or unexpected reply (status " + res.status + "). Wait a moment and try again.");
+    if (!data) {
+      if (res.status === 405 || res.status === 404) throw new Error("This page is not connected to the PhishScan server. Open it from the address where app.py is running (http://127.0.0.1:5000) or from your Render link, not from Live Server.");
+      throw new Error("The server returned an empty or unexpected reply (status " + res.status + "). Wait a moment and try again.");
+    }
     if (!res.ok) throw new Error(data.error || "Request failed");
     $("status").textContent = "";
     render(data);
