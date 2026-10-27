@@ -81,29 +81,43 @@ button.primary:disabled{opacity:.6;cursor:wait}
 .grid .card{margin-top:0}
 .card h3{margin:0 0 6px;font-size:17px;color:var(--text);font-weight:700}
 .card p{margin:0;color:var(--muted);font-size:15px}
-.verdict{display:flex;justify-content:space-between;align-items:center;font-weight:600;font-size:22px}
+.verdict{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;font-family:var(--font-head);font-weight:700;font-size:24px}
 .verdict.phishing{color:var(--bad-fg)}.verdict.suspicious{color:var(--warn-fg)}.verdict.likely_safe{color:var(--safe-fg)}.verdict.inconclusive{color:var(--grey-fg)}
-.score{font-size:15px;color:var(--muted);font-weight:500}
-.bar{height:8px;background:var(--line);border-radius:4px;margin:12px 0;overflow:hidden}
+.score{font-size:15px;color:var(--text);font-weight:600}
+.score small{color:var(--muted);font-weight:500}
+.bar{height:10px;background:var(--line);border-radius:5px;margin:12px 0 8px;overflow:hidden}
 .fill{height:100%}
 .fill.phishing{background:var(--bad)}.fill.suspicious{background:var(--warn)}.fill.likely_safe{background:var(--safe)}.fill.inconclusive{background:var(--grey)}
+.guide{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-bottom:12px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px}
+.dot.g{background:var(--safe)}.dot.y{background:var(--warn)}.dot.r{background:var(--bad)}
+.summary{font-size:16px}
+.breakdown{margin-top:8px;font-size:13px;color:var(--muted)}
+.domainbox{margin-top:14px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--th);font-size:14px}
+.domainbox div+div{margin-top:4px}
+.domainbox .age{font-weight:700}
+.domainbox .age.new{color:var(--bad-fg)}
+.domainbox .age.young{color:var(--warn-fg)}
+.domainbox .age.old{color:var(--safe-fg)}
 .finding{border-top:1px solid var(--line);padding:12px 0}
-.finding:first-child{border-top:0}
+.finding:first-of-type{border-top:0}
 .ftitle{display:flex;gap:8px;align-items:center;font-weight:600}
 .pill{font-size:11px;text-transform:uppercase;padding:2px 8px;border-radius:99px;color:#fff;letter-spacing:.04em}
 .pill.high{background:var(--bad)}.pill.medium{background:var(--warn)}.pill.low{background:var(--grey)}.pill.info{background:var(--safe)}
 .pts{margin-left:auto;color:var(--muted);font-weight:500}
 .fdetail{color:var(--muted);font-size:14px;margin-top:2px}
 .cat{font-size:12px;color:var(--muted);text-transform:uppercase;margin-top:4px}
+.okrow{display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-top:1px solid var(--line);font-size:15px}
+.okrow:first-of-type{border-top:0}
+.check{color:var(--safe-fg);font-weight:800}
+.cardtitle{display:block;margin-bottom:6px;font-family:var(--font-head);font-size:17px}
 table{width:100%;border-collapse:collapse;background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:14px}
 th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);word-break:break-all}
 th{background:var(--th);color:var(--muted);font-weight:600}
-.chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
-.chip{padding:4px 12px;border-radius:99px;background:var(--card);color:var(--text);border:1px solid var(--line);font-size:13px}
 .note{background:var(--note-bg);border:1px solid var(--note-line);color:var(--note-text);border-radius:8px;padding:10px 12px;margin-top:10px;font-size:14px}
 .legend{display:grid;gap:10px;margin-top:8px}
 .legend div{display:flex;gap:10px;align-items:baseline}
-.legend strong{min-width:150px}
+.legend strong{min-width:170px}
 .c-bad{color:var(--bad-fg)}.c-warn{color:var(--warn-fg)}.c-safe{color:var(--safe-fg)}.c-grey{color:var(--grey-fg)}
 ul{margin:8px 0 0;padding-left:20px;color:var(--muted)}
 li{margin:4px 0}
@@ -129,7 +143,7 @@ footer{text-align:center;color:var(--muted);font-size:13px;padding:0 16px 32px}
 <section id="page-home" class="page active">
 <div class="hero">
 <h1>Check a link before you trust it</h1>
-<p>PhishScan looks at the address, the domain and what the page actually does, then explains why it reached its verdict.</p>
+<p>PhishScan looks at the address, the domain and what the page actually does, then tells you whether it looks legitimate or fake, and exactly why.</p>
 <button class="primary" data-go="analyze">Start analyzing</button>
 </div>
 <div class="grid">
@@ -145,16 +159,13 @@ footer{text-align:center;color:var(--muted);font-size:13px;padding:0 16px 32px}
 
 <section id="page-analyze" class="page">
 <h1>Analyze a link</h1>
-<p class="sub">Paste a web address. The page is downloaded as text only; nothing on it is run.</p>
+<p class="sub">Paste a web address. The page is downloaded as text only; nothing on it is run. Nothing you check is saved.</p>
 <div class="row">
-<input id="url" type="text" placeholder="https://example.com/login" autocomplete="off">
+<input id="url" type="text" placeholder="https://example.com/login" autocomplete="off" spellcheck="false">
 <button id="scan" class="primary">Analyze</button>
 </div>
 <div id="status" class="muted"></div>
 <div id="result"></div>
-<h2>Recent scans</h2>
-<div id="counts" class="chips"></div>
-<table id="history"><thead><tr><th>URL</th><th>Verdict</th><th>Score</th><th>Time</th></tr></thead><tbody></tbody></table>
 </section>
 
 <section id="page-about" class="page">
@@ -167,19 +178,31 @@ footer{text-align:center;color:var(--muted);font-size:13px;padding:0 16px 32px}
 <li>A machine learning model scores the structure of the URL. It contributes at most 25 points.</li>
 <li>Domain checks look at domain age, certificate validity and redirects.</li>
 <li>Page checks look at password forms, brand impersonation, hidden iframes and obfuscated code.</li>
+<li>Every warning sign adds points to a risk score from 0 to 100, and every point is listed with its reason.</li>
 <li>A page is only called phishing when the score is high and the evidence comes from more than one layer, or from two strong content findings.</li>
 <li>If the page cannot be downloaded, the result cannot be higher than Suspicious.</li>
 </ul>
 </div>
 
 <div class="card">
-<h3>What the verdicts mean</h3>
+<h3>What the results mean</h3>
 <div class="legend">
-<div><strong class="c-bad">Phishing detected</strong><span class="muted">Strong evidence from several checks. Do not enter any information.</span></div>
+<div><strong class="c-bad">Phishing (fake site)</strong><span class="muted">Strong evidence from several checks. Do not enter any information.</span></div>
 <div><strong class="c-warn">Suspicious</strong><span class="muted">Some warning signs, but not enough to be sure. Be careful.</span></div>
-<div><strong class="c-safe">Likely safe</strong><span class="muted">No strong warning signs found. This is not a guarantee.</span></div>
+<div><strong class="c-safe">Likely legitimate</strong><span class="muted">No strong warning signs found. This is not a guarantee.</span></div>
 <div><strong class="c-grey">Inconclusive</strong><span class="muted">The page could not be inspected, so only the link and domain were checked.</span></div>
 </div>
+<p style="margin-top:12px">Risk score: 0 to 29 is low risk, 30 to 59 is medium risk, and 60 to 100 is high risk.</p>
+</div>
+
+<div class="card">
+<h3>Your privacy</h3>
+<ul>
+<li>PhishScan does not keep any history of the links people check. Nothing is saved to a database, and no list of past checks is shown.</li>
+<li>The link you enter is sent to the server so it can be analyzed, and the server visits that page.</li>
+<li>The result stays on screen only until you check another link or refresh the page.</li>
+<li>The only thing saved on your device is your light or dark mode choice.</li>
+</ul>
 </div>
 
 <div class="card">
@@ -187,8 +210,9 @@ footer{text-align:center;color:var(--muted);font-size:13px;padding:0 16px 32px}
 <ul>
 <li>Pages that build their content with JavaScript show less evidence, because only the raw page text is read.</li>
 <li>Some phishing kits show a harmless page to automated visitors.</li>
+<li>Some domain endings do not publish registration dates, so the domain age may be unavailable.</li>
 <li>The scoring weights are hand-tuned and are checked against test data, not proven.</li>
-<li>A "Likely safe" result lowers risk but never removes it.</li>
+<li>A "Likely legitimate" result lowers risk but never removes it.</li>
 </ul>
 </div>
 
@@ -207,7 +231,7 @@ const el = (tag, cls, text) => {
   if (text !== undefined) n.textContent = text;
   return n;
 };
-const LABELS = { phishing: "Phishing detected", suspicious: "Suspicious", likely_safe: "Likely safe", inconclusive: "Inconclusive" };
+const LABELS = { phishing: "Phishing (fake site)", suspicious: "Suspicious", likely_safe: "Likely legitimate", inconclusive: "Inconclusive" };
 const PAGES = ["home", "analyze", "about"];
 const THEME_KEY = "phishscan-theme";
 
@@ -230,44 +254,127 @@ function show(name) {
   document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.go === name));
   if (location.hash !== "#" + name) location.hash = name;
   window.scrollTo(0, 0);
-  if (name === "analyze") loadHistory();
+}
+
+function ageText(days) {
+  if (days === null || days === undefined) return "Could not be determined";
+  if (days < 1) return "Registered today";
+  const years = Math.floor(days / 365);
+  const months = Math.floor((days % 365) / 30);
+  const parts = [];
+  if (years) parts.push(years + (years === 1 ? " year" : " years"));
+  if (months) parts.push(months + (months === 1 ? " month" : " months"));
+  if (!years && !months) parts.push(days + (days === 1 ? " day" : " days"));
+  return parts.join(", ");
+}
+
+function createdText(iso) {
+  if (!iso) return "";
+  const d = new Date(iso + "T00:00:00");
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+function bandText(score) {
+  if (score < 30) return "Low risk";
+  if (score < 60) return "Medium risk";
+  return "High risk";
+}
+
+function breakdownText(b, score) {
+  let t = "Score breakdown: +" + b.warning + " warning points";
+  if (b.trust < 0) t += ", " + b.trust + " trust credit";
+  if (b.warning + b.trust > 100) t += " (capped at 100)";
+  return t + " = " + score + ".";
+}
+
+function headings(verdict) {
+  if (verdict === "phishing") return { bad: "Why this site looks fake", good: "Checks that looked normal" };
+  if (verdict === "suspicious") return { bad: "Warning signs found", good: "Checks that looked normal" };
+  if (verdict === "likely_safe") return { bad: "Minor warning signs", good: "Why this site looks legitimate" };
+  return { bad: "Warning signs found", good: "What could be checked" };
+}
+
+function domainBox(info) {
+  const box = el("div", "domainbox");
+  const name = info && info.name ? info.name : "unknown";
+  box.append(el("div", "", "Domain: " + name));
+  const days = info ? info.age_days : null;
+  const line = el("div", "");
+  line.append(document.createTextNode("Domain age: "));
+  const cls = days === null || days === undefined ? "" : days < 30 ? "new" : days < 180 ? "young" : days >= 730 ? "old" : "";
+  line.append(el("span", "age " + cls, ageText(days)));
+  const created = createdText(info && info.created);
+  if (created) line.append(document.createTextNode(" (registered " + created + ")"));
+  box.append(line);
+  if (days === null || days === undefined) {
+    box.append(el("div", "muted", "Some domain endings do not publish registration dates, or the registry did not answer in time."));
+  } else if (days < 30) {
+    box.append(el("div", "muted", "Very new domains are a common sign of phishing."));
+  }
+  return box;
 }
 
 function findingNode(f) {
   const row = el("div", "finding");
   const title = el("div", "ftitle");
-  title.append(el("span", "pill " + f.severity, f.severity === "info" ? "trust" : f.severity), el("span", "", f.title), el("span", "pts", (f.points > 0 ? "+" : "") + f.points));
+  title.append(el("span", "pill " + f.severity, f.severity), el("span", "", f.title), el("span", "pts", "+" + f.points));
   row.append(title, el("div", "fdetail", f.detail), el("div", "cat", f.category));
   return row;
 }
 
-function section(heading, items) {
+function warningCard(heading, items) {
   const card = el("div", "card");
-  card.append(el("strong", "", heading));
+  card.append(el("strong", "cardtitle", heading));
   items.forEach((f) => card.append(findingNode(f)));
+  return card;
+}
+
+function okCard(heading, items) {
+  const card = el("div", "card");
+  card.append(el("strong", "cardtitle", heading));
+  items.forEach((text) => {
+    const row = el("div", "okrow");
+    row.append(el("span", "check", "✓"), el("span", "", text));
+    card.append(row);
+  });
   return card;
 }
 
 function render(d) {
   const box = $("result");
   box.replaceChildren();
+
   const head = el("div", "card");
   const verdict = el("div", "verdict " + d.verdict);
-  verdict.append(el("span", "", LABELS[d.verdict]), el("span", "score", "Risk score " + d.score + "/100"));
+  const score = el("span", "score");
+  score.append(document.createTextNode("Risk score " + d.score + "/100 "), el("small", "", "· " + bandText(d.score)));
+  verdict.append(el("span", "", LABELS[d.verdict]), score);
   const bar = el("div", "bar");
   const fill = el("div", "fill " + d.verdict);
   fill.style.width = d.score + "%";
   bar.append(fill);
-  head.append(verdict, bar, el("div", "", d.summary));
+
+  const guide = el("div", "guide");
+  [["g", "0 to 29 low risk"], ["y", "30 to 59 medium risk"], ["r", "60 to 100 high risk"]].forEach(([c, t]) => {
+    const item = el("span", "");
+    item.append(el("span", "dot " + c), document.createTextNode(t));
+    guide.append(item);
+  });
+
+  head.append(verdict, bar, guide, el("div", "summary", d.summary), el("div", "breakdown", breakdownText(d.breakdown, d.score)), domainBox(d.domain));
   if (d.page && d.page.final_url) {
     head.append(el("div", "muted", "Final address: " + d.page.final_url));
     if (d.page.title) head.append(el("div", "muted", "Page title: " + d.page.title));
   }
   d.notes.forEach((n) => head.append(el("div", "note", n)));
   box.append(head);
-  if (d.findings.length) box.append(section("Why this result: warning signs found", d.findings));
-  if (d.trust.length) box.append(section("Trust signals", d.trust));
-  if (!d.findings.length) box.append(el("div", "card muted", "No warning signs were found in any layer."));
+
+  const h = headings(d.verdict);
+  const bad = d.findings.length ? warningCard(h.bad, d.findings) : null;
+  const good = d.passed.length ? okCard(h.good, d.passed) : null;
+  const order = d.verdict === "likely_safe" ? [good, bad] : [bad, good];
+  order.forEach((c) => { if (c) box.append(c); });
 }
 
 async function scan() {
@@ -278,32 +385,17 @@ async function scan() {
   $("result").replaceChildren();
   try {
     const res = await fetch("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
-    const data = await res.json();
+    const text = await res.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch (e) { data = null; }
+    if (!data) throw new Error("The server returned an empty or unexpected reply (status " + res.status + "). Wait a moment and try again.");
     if (!res.ok) throw new Error(data.error || "Request failed");
     $("status").textContent = "";
     render(data);
-    loadHistory();
   } catch (e) {
-    $("status").textContent = e.message;
+    $("status").textContent = e instanceof TypeError ? "Cannot reach the server. Check your connection and try again." : e.message;
   }
   $("scan").disabled = false;
-}
-
-async function loadHistory() {
-  try {
-    const data = await (await fetch("/api/history")).json();
-    const body = $("history").querySelector("tbody");
-    body.replaceChildren();
-    data.recent.forEach((r) => {
-      const tr = el("tr");
-      [r.url, LABELS[r.verdict] || r.verdict, r.score, r.created].forEach((v) => tr.append(el("td", "", String(v))));
-      body.append(tr);
-    });
-    $("counts").replaceChildren();
-    Object.entries(data.counts).forEach(([k, v]) => $("counts").append(el("span", "chip", (LABELS[k] || k) + ": " + v)));
-  } catch (e) {
-    return;
-  }
 }
 
 async function loadMetrics() {
@@ -336,6 +428,7 @@ if (window.matchMedia) {
 }
 
 applyTheme(document.documentElement.getAttribute("data-theme"));
+$("url").value = "";
 show(location.hash.slice(1) || "home");
 loadMetrics();
 </script>

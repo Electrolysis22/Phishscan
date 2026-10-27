@@ -1,13 +1,15 @@
+import re
 from urllib.parse import urlparse
 
 import joblib
 import pandas as pd
 from bs4 import BeautifulSoup
 
-from analyzer import content_findings, domain_age_days, domain_findings, fetch, url_findings
+from analyzer import content_findings, domain_age_days, domain_created, domain_findings, fetch, url_findings
 from features import extract, normalize, reg_domain
 
 MODEL = joblib.load("model/model.joblib")
+PASSWORD_TYPE = re.compile(r"^password$", re.I)
 
 ERRORS = {
     "unresolved": "The domain does not resolve, so the page could not be inspected.",
@@ -18,6 +20,23 @@ ERRORS = {
 }
 
 
+def plural(n, word):
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+def age_phrase(days):
+    years = days // 365
+    months = (days % 365) // 30
+    parts = []
+    if years:
+        parts.append(plural(years, "year"))
+    if months:
+        parts.append(plural(months, "month"))
+    if not parts:
+        parts.append(plural(days, "day"))
+    return ", ".join(parts)
+
+
 def decide(findings, fetched):
     positive = sum(f["points"] for f in findings if f["points"] > 0)
     negative = sum(f["points"] for f in findings if f["points"] < 0)
@@ -25,9 +44,12 @@ def decide(findings, fetched):
     trust_ignored = bool(high_content) and negative < 0
     if high_content:
         negative = 0
-    score = max(0, min(100, positive + negative))
-    if len(high_content) >= 2:
-        score = max(score, 70)
+    raw = max(0, min(100, positive + negative))
+    score = raw
+    boosted = False
+    if len(high_content) >= 2 and raw < 70:
+        score = 70
+        boosted = True
     categories = {f["category"] for f in findings if f["points"] > 0}
     if fetched and score >= 60 and (len(categories) >= 2 or len(high_content) >= 2):
         verdict = "phishing"
@@ -37,18 +59,50 @@ def decide(findings, fetched):
         verdict = "likely_safe"
     else:
         verdict = "inconclusive"
-    return verdict, score, trust_ignored
+    return {
+        "verdict": verdict,
+        "score": score,
+        "trust_ignored": trust_ignored,
+        "boosted": boosted,
+        "warning_points": positive,
+        "trust_points": negative,
+    }
 
 
 def summarize(verdict, findings):
     top = [f["title"] for f in sorted(findings, key=lambda f: -f["points"]) if f["points"] > 0][:3]
     if verdict == "phishing":
-        return "Strong evidence from multiple checks: " + "; ".join(top) + "."
+        return "This looks like a fake (phishing) site. Main reasons: " + "; ".join(top) + "."
     if verdict == "suspicious":
-        return "Some warning signs were found, but not enough to confirm phishing: " + "; ".join(top) + "."
+        return "This site is suspicious, but the evidence is not strong enough to call it fake. Main reasons: " + "; ".join(top) + "."
     if verdict == "likely_safe":
-        return "No strong phishing indicators were found in the URL, domain, or page content. This is not a guarantee of safety."
-    return "The page could not be inspected, so only the URL and domain were checked. Nothing alarming was found, but this is not a confirmation of safety."
+        return "This looks like a legitimate site. No strong warning signs were found. No automatic check is a guarantee, so stay careful with passwords and payments."
+    return "The page could not be inspected, so no firm conclusion is possible. Only the link and domain were checked, and nothing alarming was found there."
+
+
+def passed_checks(url, ml_prob, result, age_days, soup, findings):
+    warned = {f["title"] for f in findings if f["points"] > 0}
+    cats = {f["category"] for f in findings if f["points"] > 0}
+    out = []
+    if "url" not in cats:
+        out.append("The link looks ordinary: no IP address, look-alike characters, link shortener or misleading brand name.")
+    if ml_prob < 0.5:
+        out.append(f"The URL-pattern model rates this link {round(ml_prob * 100)}% phishing-like, which is low.")
+    if urlparse(url).scheme == "https" and not result["ssl_failed"]:
+        out.append("The connection uses HTTPS with a valid security certificate.")
+    if age_days is not None and age_days >= 180:
+        out.append(f"The domain has existed for {age_phrase(age_days)}, so it is not a brand-new registration.")
+    if "Redirects to a different domain" not in warned:
+        out.append("The link does not send you to a different domain.")
+    if soup is not None:
+        if "content" not in cats:
+            out.append("The page showed no hidden frames, disguised code or data-stealing forms.")
+        has_password = bool(soup.find("input", attrs={"type": PASSWORD_TYPE}))
+        if has_password and not any(t.startswith("Password form") for t in warned):
+            out.append("The page has a login form, but it does not send the password to a different domain.")
+        if not any(t.startswith("Page impersonates") for t in warned):
+            out.append("The page does not pretend to be a well-known brand that it is not hosted by.")
+    return out
 
 
 def analyze(raw):
@@ -64,9 +118,12 @@ def analyze(raw):
     fetched = result["html"] is not None
     final_url = result["final_url"]
     final_rd = reg_domain((urlparse(final_url).hostname or "").lower())
-    findings += domain_findings(reg_domain(host), result, domain_age_days(final_rd))
+    created = domain_created(final_rd)
+    age_days = domain_age_days(created)
+    findings += domain_findings(reg_domain(host), result, age_days)
 
     page = {}
+    soup = None
     if fetched:
         soup = BeautifulSoup(result["html"], "html.parser")
         findings += content_findings(soup, result["html"], final_url)
@@ -78,23 +135,35 @@ def analyze(raw):
             "forms": len(soup.find_all("form")),
         }
 
-    verdict, score, trust_ignored = decide(findings, fetched)
+    decision = decide(findings, fetched)
+    verdict = decision["verdict"]
 
     notes = []
     if not fetched:
         notes.append(ERRORS.get(result["error"], "The page could not be inspected."))
         notes.append("Without page content the verdict cannot exceed Suspicious.")
-    if trust_ignored:
-        notes.append("Trust signals were not applied because strong content evidence was found.")
+    if decision["trust_ignored"]:
+        notes.append("Trust credit was not applied because strong content evidence was found.")
+    if decision["boosted"]:
+        notes.append("The score was raised to 70 because two strong findings were found on the page itself.")
 
     return {
         "url": url,
         "verdict": verdict,
-        "score": score,
+        "score": decision["score"],
         "summary": summarize(verdict, findings),
         "findings": sorted([f for f in findings if f["points"] > 0], key=lambda f: -f["points"]),
-        "trust": [f for f in findings if f["points"] < 0],
+        "passed": passed_checks(url, ml_prob, result, age_days, soup, findings),
+        "breakdown": {
+            "warning": decision["warning_points"],
+            "trust": decision["trust_points"],
+        },
         "notes": notes,
         "page": page,
         "ml_probability": round(ml_prob, 3),
+        "domain": {
+            "name": final_rd,
+            "age_days": age_days,
+            "created": created.date().isoformat() if created else None,
+        },
     }

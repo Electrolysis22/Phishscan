@@ -2,6 +2,7 @@ import ipaddress
 import os
 import re
 import socket
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
 
@@ -43,6 +44,8 @@ BRANDS = {
 }
 
 SENSITIVE_TOKENS = {"cvv", "cvc", "ssn", "otp", "pin", "iban", "passcode", "card", "cardnumber", "routing"}
+
+_pool = ThreadPoolExecutor(max_workers=4)
 
 
 def add(out, category, severity, points, title, detail):
@@ -114,20 +117,30 @@ def fetch(url):
     return fail("too_many_redirects")
 
 
-def domain_age_days(domain):
+def _lookup_created(domain):
+    created = whois.whois(domain).creation_date
+    if isinstance(created, list):
+        created = created[0]
+    if not isinstance(created, datetime):
+        return None
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return created
+
+
+def domain_created(domain):
     if not domain or IP_RE.match(domain):
         return None
     try:
-        created = whois.whois(domain).creation_date
-        if isinstance(created, list):
-            created = created[0]
-        if not isinstance(created, datetime):
-            return None
-        if created.tzinfo is None:
-            created = created.replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - created).days
+        return _pool.submit(_lookup_created, domain).result(timeout=6)
     except Exception:
         return None
+
+
+def domain_age_days(created):
+    if created is None:
+        return None
+    return max((datetime.now(timezone.utc) - created).days, 0)
 
 
 def brand_in_host(host):
