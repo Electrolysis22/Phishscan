@@ -2,11 +2,13 @@ import ipaddress
 import os
 import re
 import socket
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
 
 import requests
+import urllib3.util.connection as urllib3_connection
 import whois
 
 from features import IP_RE, KEYWORDS, SHORTENERS, reg_domain, subdomain_count
@@ -17,7 +19,9 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 MAX_BYTES = 1500000
+FETCH_DEADLINE = 25
 ALLOW_PRIVATE = os.environ.get("ALLOW_PRIVATE") == "1"
+STRICT_TLS = os.environ.get("STRICT_TLS") == "1"
 REDIRECT_CODES = {301, 302, 303, 307, 308}
 
 FREE_HOSTS = {
@@ -52,6 +56,40 @@ SENSITIVE_TOKENS = {"cvv", "cvc", "ssn", "otp", "pin", "iban", "passcode", "card
 _pool = ThreadPoolExecutor(max_workers=4)
 
 
+def is_public_ip(text):
+    try:
+        ip = ipaddress.ip_address(str(text).split("%")[0])
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return ip.is_global
+
+
+_original_create_connection = urllib3_connection.create_connection
+
+
+def _guarded_create_connection(address, *args, **kwargs):
+    host, port = address[0], address[1]
+    host = str(host).strip("[]")
+    if ALLOW_PRIVATE:
+        return _original_create_connection((host, port), *args, **kwargs)
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    ips = [info[4][0] for info in infos]
+    if not ips or not all(is_public_ip(ip) for ip in ips):
+        raise OSError("blocked non-public address")
+    last_error = None
+    for ip in ips:
+        try:
+            return _original_create_connection((ip, port), *args, **kwargs)
+        except OSError as e:
+            last_error = e
+    raise last_error or OSError("no usable address")
+
+
+urllib3_connection.create_connection = _guarded_create_connection
+
+
 def add(out, category, severity, points, title, detail):
     out.append({"category": category, "severity": severity, "points": points, "title": title, "detail": detail})
 
@@ -66,12 +104,8 @@ def host_status(url):
         return "unresolved"
     if ALLOW_PRIVATE:
         return "ok"
-    for info in infos:
-        try:
-            if not ipaddress.ip_address(info[4][0]).is_global:
-                return "blocked"
-        except ValueError:
-            return "blocked"
+    if not all(is_public_ip(info[4][0]) for info in infos):
+        return "blocked"
     return "ok"
 
 
@@ -79,56 +113,70 @@ def fetch(url):
     chain = [url]
     current = url
     ssl_failed = False
+    deadline = time.monotonic() + FETCH_DEADLINE
+    session = requests.Session()
+    session.trust_env = False
+    session.headers.update(HEADERS)
 
     def fail(error, status=None):
         return {"html": None, "chain": chain, "ssl_failed": ssl_failed, "error": error, "final_url": current, "status": status}
 
-    for _ in range(8):
-        status = host_status(current)
-        if status != "ok":
-            return fail(status)
-        try:
-            r = requests.get(current, headers=HEADERS, timeout=8, allow_redirects=False, stream=True, verify=not ssl_failed)
-        except requests.exceptions.SSLError:
-            if ssl_failed:
+    try:
+        for _ in range(8):
+            if time.monotonic() > deadline:
                 return fail("unreachable")
-            ssl_failed = True
-            continue
-        except requests.RequestException:
-            return fail("unreachable")
-        if r.status_code in REDIRECT_CODES and r.headers.get("Location"):
-            current = urljoin(current, r.headers["Location"])
-            chain.append(current)
+            status = host_status(current)
+            if status != "ok":
+                return fail(status)
+            try:
+                r = session.get(current, timeout=8, allow_redirects=False, stream=True, verify=not ssl_failed)
+            except requests.exceptions.SSLError:
+                if ssl_failed or STRICT_TLS:
+                    ssl_failed = True
+                    return fail("ssl_error")
+                ssl_failed = True
+                continue
+            except requests.RequestException:
+                return fail("unreachable")
+            if r.status_code in REDIRECT_CODES and r.headers.get("Location"):
+                current = urljoin(current, r.headers["Location"])
+                chain.append(current)
+                r.close()
+                continue
+            if r.status_code >= 400:
+                code = r.status_code
+                r.close()
+                return fail("http_error", code)
+            if "html" not in r.headers.get("Content-Type", "").lower():
+                r.close()
+                return fail("not_html", r.status_code)
+            body = b""
+            try:
+                for part in r.iter_content(65536):
+                    body += part
+                    if len(body) > MAX_BYTES or time.monotonic() > deadline:
+                        break
+            except requests.RequestException:
+                r.close()
+                return fail("unreachable")
             r.close()
-            continue
-        if r.status_code >= 400:
-            code = r.status_code
-            r.close()
-            return fail("http_error", code)
-        if "html" not in r.headers.get("Content-Type", "").lower():
-            r.close()
-            return fail("not_html", r.status_code)
-        body = b""
-        for part in r.iter_content(65536):
-            body += part
-            if len(body) > MAX_BYTES:
-                break
-        r.close()
-        return {
-            "html": body.decode(r.encoding or "utf-8", errors="ignore"),
-            "chain": chain,
-            "ssl_failed": ssl_failed,
-            "error": None,
-            "final_url": current,
-            "status": r.status_code,
-        }
-    return fail("too_many_redirects")
+            return {
+                "html": body.decode(r.encoding or "utf-8", errors="ignore"),
+                "chain": chain,
+                "ssl_failed": ssl_failed,
+                "error": None,
+                "final_url": current,
+                "status": r.status_code,
+            }
+        return fail("too_many_redirects")
+    finally:
+        session.close()
 
 
 def _lookup_created(domain):
     created = whois.whois(domain).creation_date
     if isinstance(created, list):
-        created = created[0]
+        created = created[0] if created else None
     if not isinstance(created, datetime):
         return None
     if created.tzinfo is None:
@@ -138,11 +186,16 @@ def _lookup_created(domain):
 
 def domain_created(domain):
     if not domain or IP_RE.match(domain):
-        return None
+        return None, "not_applicable"
     try:
-        return _pool.submit(_lookup_created, domain).result(timeout=6)
+        created = _pool.submit(_lookup_created, domain).result(timeout=6)
+    except FutureTimeout:
+        return None, "timeout"
     except Exception:
-        return None
+        return None, "error"
+    if created is None:
+        return None, "unavailable"
+    return created, "ok"
 
 
 def domain_age_days(created):
@@ -192,7 +245,7 @@ def url_findings(url, ml_prob):
     if u.scheme != "https":
         add(out, "url", "medium", 8, "Connection is not encrypted (HTTP)", "The page is served without HTTPS.")
     if ml_prob >= 0.5:
-        add(out, "url", "medium", round(ml_prob * 25), "URL structure resembles known phishing URLs", f"The machine-learning model gives this URL a {round(ml_prob * 100)}% phishing probability based on its structure alone.")
+        add(out, "url", "medium", round(ml_prob * 25), "URL structure resembles known phishing URLs", f"The URL-pattern model scores this link {round(ml_prob * 100)}% phishing-like. This is a pattern score, not the probability that the site is fake.")
     return out
 
 
@@ -253,40 +306,4 @@ def content_findings(soup, html, final_url):
     body_words = re.findall(r"[a-z0-9]+", soup.get_text(" ", strip=True).lower())[:400]
     best, best_score = None, 0
     for brand in BRANDS:
-        s = 3 * title_words.count(brand) + body_words.count(brand)
-        if s > best_score:
-            best, best_score = brand, s
-    if best and best_score >= 3:
-        official = BRANDS[best]
-        if rd in official:
-            add(out, "trust", "info", -10, f"Page is hosted on an official {best} domain", f"{rd} is a known {best} domain.")
-        elif asks:
-            add(out, "content", "high", 40, f"Page impersonates {best}", f"The page presents itself as {best} and asks for a password or sensitive data, but it is hosted on {rd}, not an official domain ({', '.join(official)}).")
-            assets = [t.get("src") or t.get("href") or "" for t in soup.find_all(["img", "link", "script"])]
-            hot = [a for a in assets if a and reg_domain((urlparse(urljoin(final_url, a)).hostname or "").lower()) in official]
-            if hot:
-                add(out, "content", "medium", 10, f"Loads {best} images or files directly from the real site", f"{len(hot)} resource(s) are hotlinked from the genuine {best} website to make the copy look authentic.")
-
-    if asks and rd in FREE_HOSTS:
-        add(out, "content", "medium", 10, "Credential page on a free hosting platform", f"{rd} lets anyone publish pages. Free hosts are common for short-lived phishing pages.")
-
-    hidden = 0
-    for frame in soup.find_all("iframe"):
-        style = (frame.get("style") or "").replace(" ", "").lower()
-        if "display:none" in style or "visibility:hidden" in style or str(frame.get("width", "")) in ("0", "1") or str(frame.get("height", "")) in ("0", "1"):
-            hidden += 1
-    if hidden:
-        add(out, "content", "medium", 10, "Hidden iframe on the page", f"{hidden} invisible iframe(s) were found. They can load content or track victims without being seen.")
-
-    if re.search(r"oncontextmenu\s*=\s*[\"']?\s*return\s+false", html, re.I):
-        add(out, "content", "low", 6, "Right-click is disabled", "Disabling the context menu is used to stop victims inspecting the page source.")
-
-    if re.search(r"eval\s*\(", html) and re.search(r"atob\s*\(|unescape\s*\(|fromCharCode", html):
-        add(out, "content", "medium", 10, "Obfuscated JavaScript", "The page decodes and executes hidden code (eval combined with atob/unescape/fromCharCode).")
-
-    anchors = [(a.get("href") or "").strip() for a in soup.find_all("a")]
-    if asks and len(anchors) >= 5:
-        dead = sum(1 for h in anchors if h in ("", "#") or h.lower().startswith("javascript:"))
-        if dead / len(anchors) > 0.5:
-            add(out, "content", "medium", 8, "Most links on the page are dead", f"{dead} of {len(anchors)} links go nowhere, typical of a cloned page.")
-    return out
+        s = 3 * title_words.count(brand) +

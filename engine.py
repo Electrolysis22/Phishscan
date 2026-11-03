@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 from urllib.parse import urlparse
 
 import joblib
@@ -8,7 +9,8 @@ from bs4 import BeautifulSoup
 from analyzer import content_findings, domain_age_days, domain_created, domain_findings, fetch, url_findings
 from features import extract, normalize, reg_domain
 
-MODEL = joblib.load("model/model.joblib")
+BASE_DIR = Path(__file__).resolve().parent
+MODEL = joblib.load(BASE_DIR / "model" / "model.joblib")
 PASSWORD_TYPE = re.compile(r"^password$", re.I)
 SCHEME_RE = re.compile(r"^https?://", re.I)
 
@@ -19,6 +21,7 @@ ERRORS = {
     "http_error": "The site refused to show its page to an automated visitor, which many large sites do.",
     "not_html": "The address did not return a web page.",
     "too_many_redirects": "The link redirected too many times to follow.",
+    "ssl_error": "The site's security certificate is invalid, so the page was not opened.",
 }
 
 
@@ -78,7 +81,7 @@ def decide(findings, fetched, age_days):
     }
 
 
-def summarize(verdict, findings, fetched, limited):
+def summarize(verdict, findings, fetched, limited, thin):
     top = [f["title"] for f in sorted(findings, key=lambda f: -f["points"]) if f["points"] > 0][:3]
     if verdict == "phishing":
         text = "This looks like a fake (phishing) site. Main reasons: " + "; ".join(top) + "."
@@ -89,6 +92,8 @@ def summarize(verdict, findings, fetched, limited):
         return "This site is suspicious, but the evidence is not strong enough to call it fake. Main reasons: " + "; ".join(top) + "."
     if verdict == "likely_safe" and limited:
         return "This looks legitimate based on the link and its domain, but the page itself could not be opened, so it was not checked in full."
+    if verdict == "likely_safe" and thin:
+        return "This looks legitimate based on what could be checked, but the page loads most of its content with JavaScript, so the check was only partial."
     if verdict == "likely_safe":
         return "This looks like a legitimate site. No strong warning signs were found. No automatic check is a guarantee, so stay careful with passwords and payments."
     return "The page could not be opened, and the link and domain alone do not give enough evidence to say whether it is fake or real."
@@ -101,7 +106,7 @@ def passed_checks(url, ml_prob, result, age_days, soup, findings):
     if "url" not in cats:
         out.append("The link looks ordinary: no IP address, look-alike characters, link shortener or misleading brand name.")
     if ml_prob < 0.5:
-        out.append(f"The URL-pattern model rates this link {round(ml_prob * 100)}% phishing-like, which is low.")
+        out.append(f"The URL-pattern model scores this link {round(ml_prob * 100)}% phishing-like, which is low.")
     if urlparse(url).scheme == "https" and not result["ssl_failed"]:
         out.append("The connection uses HTTPS with a valid security certificate.")
     if age_days is not None and age_days >= 180:
@@ -140,15 +145,18 @@ def analyze(raw):
 
     final_url = result["final_url"]
     final_rd = reg_domain((urlparse(final_url).hostname or "").lower())
-    created = domain_created(final_rd)
+    created, age_status = domain_created(final_rd)
     age_days = domain_age_days(created)
     findings += domain_findings(reg_domain(host), result, age_days)
 
     page = {}
     soup = None
+    thin = False
     if fetched:
         soup = BeautifulSoup(result["html"], "html.parser")
         findings += content_findings(soup, result["html"], final_url)
+        visible = soup.get_text(" ", strip=True)
+        thin = len(visible) < 300 and len(soup.find_all("script")) >= 3
         page = {
             "title": soup.title.get_text(" ", strip=True) if soup.title else "",
             "final_url": final_url,
@@ -164,6 +172,8 @@ def analyze(raw):
     if not fetched:
         notes.append(ERRORS.get(result["error"], "The page could not be opened."))
         notes.append("The result rests on the link and domain checks only.")
+    if thin:
+        notes.append("This page builds most of its content with JavaScript, which the scanner does not run, so only part of it could be checked.")
     if decision["trust_ignored"]:
         notes.append("Trust credit was not applied because strong content evidence was found.")
     if decision["boosted"]:
@@ -172,8 +182,9 @@ def analyze(raw):
     return {
         "url": url,
         "verdict": verdict,
+        "partial": decision["limited"] or thin,
         "score": decision["score"],
-        "summary": summarize(verdict, findings, fetched, decision["limited"]),
+        "summary": summarize(verdict, findings, fetched, decision["limited"], thin),
         "findings": sorted([f for f in findings if f["points"] > 0], key=lambda f: -f["points"]),
         "passed": passed_checks(url, ml_prob, result, age_days, soup, findings),
         "breakdown": {
@@ -186,6 +197,7 @@ def analyze(raw):
         "domain": {
             "name": final_rd,
             "age_days": age_days,
+            "age_status": age_status,
             "created": created.date().isoformat() if created else None,
         },
     }

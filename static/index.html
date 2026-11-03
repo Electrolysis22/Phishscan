@@ -183,6 +183,7 @@ footer{text-align:center;color:var(--muted);font-size:13px;padding:0 16px 32px}
 <li>Domain checks look at domain age, certificate validity and redirects.</li>
 <li>Page checks look at password forms, brand impersonation, hidden iframes and obfuscated code.</li>
 <li>Every warning sign adds points to a risk score from 0 to 100, and every point is listed with its reason.</li>
+<li>The score is a rule-based risk estimate, not a probability. The URL model's percentage is a pattern score, not the chance that a site is fake.</li>
 <li>A page is called fake only when the score is high and the evidence comes from more than one layer, or from two strong findings on the page itself.</li>
 <li>If the page cannot be opened, the result rests on the link and domain alone and says so.</li>
 </ul>
@@ -243,6 +244,11 @@ const HEADLINES = {
   inconclusive: "❔ Could not decide"
 };
 const PAGES = ["home", "analyze", "about"];
+
+function headline(d) {
+  if (d.verdict === "likely_safe" && d.partial) return "✅ Looks legitimate (limited check)";
+  return HEADLINES[d.verdict];
+}
 const THEME_KEY = "phishscan-theme";
 
 function applyTheme(theme) {
@@ -317,8 +323,14 @@ function domainBox(info) {
   const created = createdText(info && info.created);
   if (created) line.append(document.createTextNode(" (registered " + created + ")"));
   box.append(line);
-  if (days === null || days === undefined) {
-    box.append(el("div", "muted", "Some domain endings do not publish registration dates, or the registry did not answer in time."));
+    if (days === null || days === undefined) {
+    const reasons = {
+      timeout: "The registration lookup took too long, so the domain age is unknown.",
+      error: "The registration lookup failed, so the domain age is unknown.",
+      unavailable: "This domain ending does not publish registration dates.",
+      not_applicable: "Registration age is not available for raw IP addresses."
+    };
+    box.append(el("div", "muted", reasons[info && info.age_status] || "The domain age could not be determined."));
   } else if (days < 30) {
     box.append(el("div", "muted", "Very new domains are a common sign of phishing."));
   }
@@ -365,7 +377,7 @@ function render(d) {
   const verdict = el("div", "verdict " + d.verdict);
   const score = el("span", "score");
   score.append(document.createTextNode("Risk score " + d.score + "/100 "), el("small", "", "· " + bandText(d.score)));
-  verdict.append(el("span", "", HEADLINES[d.verdict]), score);
+  verdict.append(el("span", "", headline(d)), score);
   const bar = el("div", "bar");
   const fill = el("div", "fill " + d.verdict);
   fill.style.width = d.score + "%";
