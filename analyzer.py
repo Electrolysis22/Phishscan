@@ -306,4 +306,4 @@ def content_findings(soup, html, final_url):
     body_words = re.findall(r"[a-z0-9]+", soup.get_text(" ", strip=True).lower())[:400]
     best, best_score = None, 0
     for brand in BRANDS:
-        s = 3 * title_words.count(brand) +
+        s = 3 * title_words.count(brand) + other_term
