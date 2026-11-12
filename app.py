@@ -1,55 +1,101 @@
-import json
-import traceback
+import re
 from pathlib import Path
+from urllib.parse import urlparse
 
-from flask import Flask, jsonify, request, send_from_directory
+import joblib
+import pandas as pd
+from bs4 import BeautifulSoup
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 
-from engine import analyze
+from analyzer import (add, content_findings, domain_age_days, domain_created,
+                      domain_findings, fetch, url_findings)
+from features import extract_features, reg_domain
 
-BASE_DIR = Path(__file__).resolve().parent
-app = Flask(__name__, static_folder=str(BASE_DIR / "static"))
+BASE_DIR = Path(__file__).parent
 
-
-@app.after_request
-def no_cache(response):
-    if request.path.startswith("/api/"):
-        response.headers["Cache-Control"] = "no-store"
-    return response
-
-
-@app.get("/")
-def index():
-    return send_from_directory(BASE_DIR / "static", "index.html")
-
-
-@app.post("/api/analyze")
-def api_analyze():
-    data = request.get_json(silent=True)
-    url = data.get("url") if isinstance(data, dict) else None
-    if not isinstance(url, str):
-        return jsonify({"error": "Enter a valid URL."}), 400
-    url = url.strip()
-    if not url or len(url) > 2048 or any(ord(c) < 32 for c in url):
-        return jsonify({"error": "Enter a valid URL."}), 400
-    try:
-        result = analyze(url)
-    except ValueError:
-        return jsonify({"error": "Enter a valid URL."}), 400
-    except Exception as e:
-        frames = "".join(traceback.format_tb(e.__traceback__))
-        app.logger.error("analysis failed: %s\n%s", type(e).__name__, frames)
-        return jsonify({"error": "Analysis failed. Try again."}), 500
-    return jsonify(result)
+bundle = joblib.load(BASE_DIR / "models" / "best_model.joblib")
+model, FEATURES = bundle["model"], bundle["features"]
+app = FastAPI(title="Phishing URL Detector")
 
 
-@app.get("/api/metrics")
-def metrics():
-    try:
-        with open(BASE_DIR / "model" / "metrics.json") as f:
-            return jsonify(json.load(f))
-    except FileNotFoundError:
-        return jsonify({})
+class Req(BaseModel):
+    url: str
 
 
-if __name__ == "__main__":
-    app.run(port=5000)
+def ml_probability(raw_url):
+    feats = extract_features(raw_url)
+    return float(model.predict_proba(pd.DataFrame([feats])[FEATURES])[0, 1])
+
+
+@app.post("/predict")
+def predict(req: Req):
+    prob = ml_probability(req.url)
+    return {
+        "url": req.url,
+        "verdict": "phishing" if prob >= 0.5 else "legitimate",
+        "phishing_probability": round(prob, 4),
+    }
+
+
+@app.post("/analyze")
+def analyze(req: Req):
+    raw = req.url.strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty URL")
+    url = raw if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", raw) else "https://" + raw
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        raise HTTPException(status_code=400, detail="Invalid URL")
+
+    input_rd = reg_domain(host)
+    ml_prob = ml_probability(raw)
+
+    findings = url_findings(url, ml_prob)
+
+    result = fetch(url)
+    created, created_status = domain_created(input_rd)
+    age = domain_age_days(created)
+    findings += domain_findings(input_rd, result, age)
+
+    if result["html"]:
+        soup = BeautifulSoup(result["html"], "html.parser")
+        findings += content_findings(soup, result["html"], result["final_url"])
+    else:
+        add(findings, "content", "info", 0, "Page could not be loaded",
+            "Only the URL and domain were checked. Reason: " + str(result["error"]) + ".")
+
+    score = max(0, min(100, sum(f["points"] for f in findings)))
+    if score >= 50:
+        verdict, label = "phishing", "Likely phishing"
+    elif score >= 25:
+        verdict, label = "suspicious", "Suspicious"
+    else:
+        verdict, label = "legitimate", "Looks legitimate"
+
+    findings.sort(key=lambda f: f["points"], reverse=True)
+    reasons = [f["title"] for f in findings if f["points"] > 0][:3]
+    summary = f"{label}. Risk score {score}/100."
+    if reasons:
+        summary += " " + "; ".join(reasons) + "."
+    if not result["html"]:
+        summary += " The page could not be loaded, so only the URL and domain were checked."
+
+    return {
+        "url": raw,
+        "final_url": result["final_url"],
+        "verdict": verdict,
+        "score": score,
+        "phishing_probability": round(score / 100, 4),
+        "domain_age_days": age,
+        "domain_age_status": created_status,
+        "fetch_error": result["error"],
+        "findings": findings,
+        "summary": summary,
+    }
+
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return (BASE_DIR / "index.html").read_text(encoding="utf-8")

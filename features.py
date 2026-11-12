@@ -1,72 +1,108 @@
 import math
 import re
+from collections import Counter
 from urllib.parse import urlparse
 
-import tldextract
+SUSPICIOUS_WORDS = [
+    "login", "signin", "verify", "update", "secure", "account", "banking",
+    "confirm", "password", "paypal", "ebay", "amazon", "apple", "support",
+    "wallet", "free", "bonus", "invoice", "webscr", "suspend",
+]
+KEYWORDS = [
+    "login", "signin", "verify", "secure", "account", "update", "banking",
+    "confirm", "password", "wallet", "support", "billing", "payment",
+    "recover", "unlock", "suspend",
+]
+SHORTENERS = {"bit.ly", "tinyurl.com", "goo.gl", "t.co", "ow.ly", "is.gd", "buff.ly", "cutt.ly"}
+SUSPICIOUS_TLDS = {"zip", "xyz", "top", "tk", "ml", "ga", "cf", "gq", "click", "work", "support", "country"}
+IP_RE = re.compile(r"^(\d{1,3}\.){3}\d{1,3}$")
 
-_tld = tldextract.TLDExtract(suffix_list_urls=())
-
-KEYWORDS = ["login", "signin", "verify", "secure", "account", "update", "bank", "confirm", "password", "wallet", "billing", "support", "webscr", "authenticate"]
-SHORTENERS = {"bit.ly", "tinyurl.com", "t.co", "goo.gl", "ow.ly", "is.gd", "buff.ly", "rebrand.ly", "cutt.ly", "shorturl.at"}
-IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
-
-
-def normalize(url):
-    url = url.strip()
-    if not re.match(r"^https?://", url, re.I):
-        url = "https://" + url
-    return url
+MULTI_TLDS = {
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz",
+    "co.za", "com.ng", "org.ng", "edu.ng", "gov.ng", "co.in", "com.br", "co.jp",
+    "com.cn", "com.mx", "com.tr", "co.ke",
+}
 
 
 def reg_domain(host):
-    ext = _tld(host or "")
-    return f"{ext.domain}.{ext.suffix}" if ext.suffix else ext.domain
+    host = (host or "").lower().strip(".")
+    if not host or IP_RE.match(host):
+        return host
+    parts = host.split(".")
+    if len(parts) <= 2:
+        return host
+    if ".".join(parts[-2:]) in MULTI_TLDS:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
 
 
 def subdomain_count(host):
-    return len([s for s in _tld(host or "").subdomain.split(".") if s])
+    host = (host or "").lower().strip(".")
+    if not host or IP_RE.match(host):
+        return 0
+    return max(len(host.split(".")) - len(reg_domain(host).split(".")), 0)
 
 
-def entropy(text):
-    if not text:
+def _entropy(s):
+    if not s:
         return 0.0
-    total = len(text)
-    return -sum((text.count(c) / total) * math.log2(text.count(c) / total) for c in set(text))
+    counts = Counter(s)
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
 
 
-def extract(url):
-    u = urlparse(url)
-    host = (u.hostname or "").lower()
-    path = u.path or ""
-    query = u.query or ""
-    tail = (path + "?" + query).lower()
+def _has_port(p):
     try:
-        has_port = u.port is not None
+        return int(p.port is not None)
     except ValueError:
-        has_port = True
+        return 0
+
+
+def extract_features(url):
+    url = str(url).strip()
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
+        url = "http://" + url
+    try:
+        p = urlparse(url)
+        host = (p.hostname or "").lower()
+    except ValueError:
+        p, host = urlparse("http://invalid"), ""
+
+    path, query = p.path or "", p.query or ""
+    parts = [x for x in host.split(".") if x]
+    tld = parts[-1] if parts else ""
+    domain = parts[-2] if len(parts) >= 2 else host
+    subdomains = parts[:-2] if len(parts) > 2 else []
+    lowered = url.lower()
+
     return {
         "url_length": len(url),
         "host_length": len(host),
         "path_length": len(path),
         "query_length": len(query),
-        "dots": url.count("."),
-        "host_hyphens": host.count("-"),
-        "underscores": url.count("_"),
-        "at_symbol": int("@" in url),
+        "num_dots": url.count("."),
+        "num_hyphens": url.count("-"),
+        "num_hyphens_host": host.count("-"),
+        "num_underscores": url.count("_"),
+        "num_slashes": url.count("/"),
+        "num_at": url.count("@"),
+        "num_question": url.count("?"),
+        "num_equals": url.count("="),
+        "num_ampersand": url.count("&"),
+        "num_percent": url.count("%"),
+        "num_digits": sum(c.isdigit() for c in url),
         "digit_ratio": sum(c.isdigit() for c in url) / max(len(url), 1),
-        "slashes": url.count("/"),
-        "ampersands": url.count("&"),
-        "percent": url.count("%"),
-        "equals": url.count("="),
-        "is_ip": int(bool(IP_RE.match(host))),
-        "subdomains": subdomain_count(host),
-        "punycode": int("xn--" in host),
-        "keywords_host": sum(k in host for k in KEYWORDS),
-        "keywords_path": sum(k in tail for k in KEYWORDS),
-        "shortener": int(reg_domain(host) in SHORTENERS),
-        "host_entropy": entropy(host),
-        "path_depth": path.count("/"),
-        "has_port": int(has_port),
-        "double_slash_path": int("//" in path),
-        "tld_in_subdomain": int(bool(re.search(r"\.(com|net|org|gov|edu)\.", host))),
+        "num_subdomains": len(subdomains),
+        "has_ip_host": int(bool(IP_RE.match(host))),
+        "is_https": int(p.scheme == "https"),
+        "has_port": _has_port(p),
+        "is_shortener": int(host in SHORTENERS),
+        "suspicious_tld": int(tld in SUSPICIOUS_TLDS),
+        "suspicious_word_count": sum(w in lowered for w in SUSPICIOUS_WORDS),
+        "brand_in_subdomain": int(any(w in ".".join(subdomains) for w in ("paypal", "apple", "amazon", "google", "microsoft", "bank"))),
+        "double_slash_in_path": int("//" in path),
+        "domain_entropy": _entropy(domain),
+        "url_entropy": _entropy(url),
+        "longest_digit_run": max((len(m) for m in re.findall(r"\d+", host)), default=0),
+        "has_punycode": int("xn--" in host),
     }

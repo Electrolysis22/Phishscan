@@ -1,0 +1,1043 @@
+[1mdiff --git a/analyzer.py b/analyzer.py[m
+[1mindex a1592c0..6461538 100644[m
+[1m--- a/analyzer.py[m
+[1m+++ b/analyzer.py[m
+[36m@@ -306,4 +306,40 @@[m [mdef content_findings(soup, html, final_url):[m
+     body_words = re.findall(r"[a-z0-9]+", soup.get_text(" ", strip=True).lower())[:400][m
+     best, best_score = None, 0[m
+     for brand in BRANDS:[m
+[31m-        s = 3 * title_words.count(brand) + other_term[m
+\ No newline at end of file[m
+[32m+[m[32m        s = 3 * title_words.count(brand) + body_words.count(brand)[m
+[32m+[m[32m        if s > best_score:[m
+[32m+[m[32m            best, best_score = brand, s[m
+[32m+[m[32m    if best and best_score >= 3:[m
+[32m+[m[32m        official = BRANDS[best][m
+[32m+[m[32m        if rd in official:[m
+[32m+[m[32m            add(out, "trust", "info", -10, f"Page is hosted on an official {best} domain", f"{rd} is a known {best} domain.")[m
+[32m+[m[32m        elif asks:[m
+[32m+[m[32m            add(out, "content", "high", 40, f"Page impersonates {best}", f"The page presents itself as {best} and asks for a password or sensitive data, but it is hosted on {rd}, not an official domain ({', '.join(official)}).")[m
+[32m+[m[32m            assets = [t.get("src") or t.get("href") or "" for t in soup.find_all(["img", "link", "script"])][m
+[32m+[m[32m            hot = [a for a in assets if a and reg_domain((urlparse(urljoin(final_url, a)).hostname or "").lower()) in official][m
+[32m+[m[32m            if hot:[m
+[32m+[m[32m                add(out, "content", "medium", 10, f"Loads {best} images or files directly from the real site", f"{len(hot)} resource(s) are hotlinked from the genuine {best} website to make the copy look authentic.")[m
+[32m+[m
+[32m+[m[32m    if asks and rd in FREE_HOSTS:[m
+[32m+[m[32m        add(out, "content", "medium", 10, "Credential page on a free hosting platform", f"{rd} lets anyone publish pages. Free hosts are common for short-lived phishing pages.")[m
+[32m+[m
+[32m+[m[32m    hidden = 0[m
+[32m+[m[32m    for frame in soup.find_all("iframe"):[m
+[32m+[m[32m        style = (frame.get("style") or "").replace(" ", "").lower()[m
+[32m+[m[32m        if "display:none" in style or "visibility:hidden" in style or str(frame.get("width", "")) in ("0", "1") or str(frame.get("height", "")) in ("0", "1"):[m
+[32m+[m[32m            hidden += 1[m
+[32m+[m[32m    if hidden:[m
+[32m+[m[32m        add(out, "content", "medium", 10, "Hidden iframe on the page", f"{hidden} invisible iframe(s) were found. They can load content or track victims without being seen.")[m
+[32m+[m
+[32m+[m[32m    if re.search(r"oncontextmenu\s*=\s*[\"']?\s*return\s+false", html, re.I):[m
+[32m+[m[32m        add(out, "content", "low", 6, "Right-click is disabled", "Disabling the context menu is used to stop victims inspecting the page source.")[m
+[32m+[m
+[32m+[m[32m    if re.search(r"eval\s*\(", html) and re.search(r"atob\s*\(|unescape\s*\(|fromCharCode", html):[m
+[32m+[m[32m        add(out, "content", "medium", 10, "Obfuscated JavaScript", "The page decodes and executes hidden code (eval combined with atob/unescape/fromCharCode).")[m
+[32m+[m
+[32m+[m[32m    anchors = [(a.get("href") or "").strip() for a in soup.find_all("a")][m
+[32m+[m[32m    if asks and len(anchors) >= 5:[m
+[32m+[m[32m        dead = sum(1 for h in anchors if h in ("", "#") or h.lower().startswith("javascript:"))[m
+[32m+[m[32m        if dead / len(anchors) > 0.5:[m
+[32m+[m[32m            add(out, "content", "medium", 8, "Most links on the page are dead", f"{dead} of {len(anchors)} links go nowhere, typical of a cloned page.")[m
+[32m+[m[32m    return out[m
+\ No newline at end of file[m
+[1mdiff --git a/app.py b/app.py[m
+[1mindex 2d8555c..ceffe41 100644[m
+[1m--- a/app.py[m
+[1m+++ b/app.py[m
+[36m@@ -1,55 +1,101 @@[m
+[31m-import json[m
+[31m-import traceback[m
+[32m+[m[32mimport re[m
+ from pathlib import Path[m
+[32m+[m[32mfrom urllib.parse import urlparse[m
+ [m
+[31m-from flask import Flask, jsonify, request, send_from_directory[m
+[32m+[m[32mimport joblib[m
+[32m+[m[32mimport pandas as pd[m
+[32m+[m[32mfrom bs4 import BeautifulSoup[m
+[32m+[m[32mfrom fastapi import FastAPI, HTTPException[m
+[32m+[m[32mfrom fastapi.responses import HTMLResponse[m
+[32m+[m[32mfrom pydantic import BaseModel[m
+ [m
+[31m-from engine import analyze[m
+[32m+[m[32mfrom analyzer import (add, content_findings, domain_age_days, domain_created,[m
+[32m+[m[32m                      domain_findings, fetch, url_findings)[m
+[32m+[m[32mfrom features import extract_features, reg_domain[m
+ [m
+[31m-BASE_DIR = Path(__file__).resolve().parent[m
+[31m-app = Flask(__name__, static_folder=str(BASE_DIR / "static"))[m
+[32m+[m[32mBASE_DIR = Path(__file__).parent[m
+ [m
+[32m+[m[32mbundle = joblib.load(BASE_DIR / "models" / "best_model.joblib")[m
+[32m+[m[32mmodel, FEATURES = bundle["model"], bundle["features"][m
+[32m+[m[32mapp = FastAPI(title="Phishing URL Detector")[m
+ [m
+[31m-@app.after_request[m
+[31m-def no_cache(response):[m
+[31m-    if request.path.startswith("/api/"):[m
+[31m-        response.headers["Cache-Control"] = "no-store"[m
+[31m-    return response[m
+ [m
+[32m+[m[32mclass Req(BaseModel):[m
+[32m+[m[32m    url: str[m
+ [m
+[31m-@app.get("/")[m
+[31m-def index():[m
+[31m-    return send_from_directory(BASE_DIR / "static", "index.html")[m
+ [m
+[32m+[m[32mdef ml_probability(raw_url):[m
+[32m+[m[32m    feats = extract_features(raw_url)[m
+[32m+[m[32m    return float(model.predict_proba(pd.DataFrame([feats])[FEATURES])[0, 1])[m
+ [m
+[31m-@app.post("/api/analyze")[m
+[31m-def api_analyze():[m
+[31m-    data = request.get_json(silent=True)[m
+[31m-    url = data.get("url") if isinstance(data, dict) else None[m
+[31m-    if not isinstance(url, str):[m
+[31m-        return jsonify({"error": "Enter a valid URL."}), 400[m
+[31m-    url = url.strip()[m
+[31m-    if not url or len(url) > 2048 or any(ord(c) < 32 for c in url):[m
+[31m-        return jsonify({"error": "Enter a valid URL."}), 400[m
+[31m-    try:[m
+[31m-        result = analyze(url)[m
+[31m-    except ValueError:[m
+[31m-        return jsonify({"error": "Enter a valid URL."}), 400[m
+[31m-    except Exception as e:[m
+[31m-        frames = "".join(traceback.format_tb(e.__traceback__))[m
+[31m-        app.logger.error("analysis failed: %s\n%s", type(e).__name__, frames)[m
+[31m-        return jsonify({"error": "Analysis failed. Try again."}), 500[m
+[31m-    return jsonify(result)[m
+ [m
+[32m+[m[32m@app.post("/predict")[m
+[32m+[m[32mdef predict(req: Req):[m
+[32m+[m[32m    prob = ml_probability(req.url)[m
+[32m+[m[32m    return {[m
+[32m+[m[32m        "url": req.url,[m
+[32m+[m[32m        "verdict": "phishing" if prob >= 0.5 else "legitimate",[m
+[32m+[m[32m        "phishing_probability": round(prob, 4),[m
+[32m+[m[32m    }[m
+ [m
+[31m-@app.get("/api/metrics")[m
+[31m-def metrics():[m
+[31m-    try:[m
+[31m-        with open(BASE_DIR / "model" / "metrics.json") as f:[m
+[31m-            return jsonify(json.load(f))[m
+[31m-    except FileNotFoundError:[m
+[31m-        return jsonify({})[m
+ [m
+[32m+[m[32m@app.post("/analyze")[m
+[32m+[m[32mdef analyze(req: Req):[m
+[32m+[m[32m    raw = req.url.strip()[m
+[32m+[m[32m    if not raw:[m
+[32m+[m[32m        raise HTTPException(status_code=400, detail="Empty URL")[m
+[32m+[m[32m    url = raw if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", raw) else "https://" + raw[m
+[32m+[m[32m    host = (urlparse(url).hostname or "").lower()[m
+[32m+[m[32m    if not host:[m
+[32m+[m[32m        raise HTTPException(status_code=400, detail="Invalid URL")[m
+ [m
+[31m-if __name__ == "__main__":[m
+[31m-    app.run(port=5000)[m
+\ No newline at end of file[m
+[32m+[m[32m    input_rd = reg_domain(host)[m
+[32m+[m[32m    ml_prob = ml_probability(raw)[m
+[32m+[m
+[32m+[m[32m    findings = url_findings(url, ml_prob)[m
+[32m+[m
+[32m+[m[32m    result = fetch(url)[m
+[32m+[m[32m    created, created_status = domain_created(input_rd)[m
+[32m+[m[32m    age = domain_age_days(created)[m
+[32m+[m[32m    findings += domain_findings(input_rd, result, age)[m
+[32m+[m
+[32m+[m[32m    if result["html"]:[m
+[32m+[m[32m        soup = BeautifulSoup(result["html"], "html.parser")[m
+[32m+[m[32m        findings += content_findings(soup, result["html"], result["final_url"])[m
+[32m+[m[32m    else:[m
+[32m+[m[32m        add(findings, "content", "info", 0, "Page could not be loaded",[m
+[32m+[m[32m            "Only the URL and domain were checked. Reason: " + str(result["error"]) + ".")[m
+[32m+[m
+[32m+[m[32m    score = max(0, min(100, sum(f["points"] for f in findings)))[m
+[32m+[m[32m    if score >= 50:[m
+[32m+[m[32m        verdict, label = "phishing", "Likely phishing"[m
+[32m+[m[32m    elif score >= 25:[m
+[32m+[m[32m        verdict, label = "suspicious", "Suspicious"[m
+[32m+[m[32m    else:[m
+[32m+[m[32m        verdict, label = "legitimate", "Looks legitimate"[m
+[32m+[m
+[32m+[m[32m    findings.sort(key=lambda f: f["points"], reverse=True)[m
+[32m+[m[32m    reasons = [f["title"] for f in findings if f["points"] > 0][:3][m
+[32m+[m[32m    summary = f"{label}. Risk score {score}/100."[m
+[32m+[m[32m    if reasons:[m
+[32m+[m[32m        summary += " " + "; ".join(reasons) + "."[m
+[32m+[m[32m    if not result["html"]:[m
+[32m+[m[32m        summary += " The page could not be loaded, so only the URL and domain were checked."[m
+[32m+[m
+[32m+[m[32m    return {[m
+[32m+[m[32m        "url": raw,[m
+[32m+[m[32m        "final_url": result["final_url"],[m
+[32m+[m[32m        "verdict": verdict,[m
+[32m+[m[32m        "score": score,[m
+[32m+[m[32m        "phishing_probability": round(score / 100, 4),[m
+[32m+[m[32m        "domain_age_days": age,[m
+[32m+[m[32m        "domain_age_status": created_status,[m
+[32m+[m[32m        "fetch_error": result["error"],[m
+[32m+[m[32m        "findings": findings,[m
+[32m+[m[32m        "summary": summary,[m
+[32m+[m[32m    }[m
+[32m+[m
+[32m+[m
+[32m+[m[32m@app.get("/", response_class=HTMLResponse)[m
+[32m+[m[32mdef home():[m
+[32m+[m[32m    return (BASE_DIR / "index.html").read_text(encoding="utf-8")[m
+\ No newline at end of file[m
+[1mdiff --git a/features.py b/features.py[m
+[1mindex b0a6a48..235ade7 100644[m
+[1m--- a/features.py[m
+[1m+++ b/features.py[m
+[36m@@ -1,72 +1,108 @@[m
+ import math[m
+ import re[m
+[32m+[m[32mfrom collections import Counter[m
+ from urllib.parse import urlparse[m
+ [m
+[31m-import tldextract[m
+[32m+[m[32mSUSPICIOUS_WORDS = [[m
+[32m+[m[32m    "login", "signin", "verify", "update", "secure", "account", "banking",[m
+[32m+[m[32m    "confirm", "password", "paypal", "ebay", "amazon", "apple", "support",[m
+[32m+[m[32m    "wallet", "free", "bonus", "invoice", "webscr", "suspend",[m
+[32m+[m[32m][m
+[32m+[m[32mKEYWORDS = [[m
+[32m+[m[32m    "login", "signin", "verify", "secure", "account", "update", "banking",[m
+[32m+[m[32m    "confirm", "password", "wallet", "support", "billing", "payment",[m
+[32m+[m[32m    "recover", "unlock", "suspend",[m
+[32m+[m[32m][m
+[32m+[m[32mSHORTENERS = {"bit.ly", "tinyurl.com", "goo.gl", "t.co", "ow.ly", "is.gd", "buff.ly", "cutt.ly"}[m
+[32m+[m[32mSUSPICIOUS_TLDS = {"zip", "xyz", "top", "tk", "ml", "ga", "cf", "gq", "click", "work", "support", "country"}[m
+[32m+[m[32mIP_RE = re.compile(r"^(\d{1,3}\.){3}\d{1,3}$")[m
+ [m
+[31m-_tld = tldextract.TLDExtract(suffix_list_urls=())[m
+[31m-[m
+[31m-KEYWORDS = ["login", "signin", "verify", "secure", "account", "update", "bank", "confirm", "password", "wallet", "billing", "support", "webscr", "authenticate"][m
+[31m-SHORTENERS = {"bit.ly", "tinyurl.com", "t.co", "goo.gl", "ow.ly", "is.gd", "buff.ly", "rebrand.ly", "cutt.ly", "shorturl.at"}[m
+[31m-IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")[m
+[31m-[m
+[31m-[m
+[31m-def normalize(url):[m
+[31m-    url = url.strip()[m
+[31m-    if not re.match(r"^https?://", url, re.I):[m
+[31m-        url = "https://" + url[m
+[31m-    return url[m
+[32m+[m[32mMULTI_TLDS = {[m
+[32m+[m[32m    "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz",[m
+[32m+[m[32m    "co.za", "com.ng", "org.ng", "edu.ng", "gov.ng", "co.in", "com.br", "co.jp",[m
+[32m+[m[32m    "com.cn", "com.mx", "com.tr", "co.ke",[m
+[32m+[m[32m}[m
+ [m
+ [m
+ def reg_domain(host):[m
+[31m-    ext = _tld(host or "")[m
+[31m-    return f"{ext.domain}.{ext.suffix}" if ext.suffix else ext.domain[m
+[32m+[m[32m    host = (host or "").lower().strip(".")[m
+[32m+[m[32m    if not host or IP_RE.match(host):[m
+[32m+[m[32m        return host[m
+[32m+[m[32m    parts = host.split(".")[m
+[32m+[m[32m    if len(parts) <= 2:[m
+[32m+[m[32m        return host[m
+[32m+[m[32m    if ".".join(parts[-2:]) in MULTI_TLDS:[m
+[32m+[m[32m        return ".".join(parts[-3:])[m
+[32m+[m[32m    return ".".join(parts[-2:])[m
+ [m
+ [m
+ def subdomain_count(host):[m
+[31m-    return len([s for s in _tld(host or "").subdomain.split(".") if s])[m
+[32m+[m[32m    host = (host or "").lower().strip(".")[m
+[32m+[m[32m    if not host or IP_RE.match(host):[m
+[32m+[m[32m        return 0[m
+[32m+[m[32m    return max(len(host.split(".")) - len(reg_domain(host).split(".")), 0)[m
+ [m
+ [m
+[31m-def entropy(text):[m
+[31m-    if not text:[m
+[32m+[m[32mdef _entropy(s):[m
+[32m+[m[32m    if not s:[m
+         return 0.0[m
+[31m-    total = len(text)[m
+[31m-    return -sum((text.count(c) / total) * math.log2(text.count(c) / total) for c in set(text))[m
+[32m+[m[32m    counts = Counter(s)[m
+[32m+[m[32m    n = len(s)[m
+[32m+[m[32m    return -sum((c / n) * math.log2(c / n) for c in counts.values())[m
+ [m
+ [m
+[31m-def extract(url):[m
+[31m-    u = urlparse(url)[m
+[31m-    host = (u.hostname or "").lower()[m
+[31m-    path = u.path or ""[m
+[31m-    query = u.query or ""[m
+[31m-    tail = (path + "?" + query).lower()[m
+[32m+[m[32mdef _has_port(p):[m
+     try:[m
+[31m-        has_port = u.port is not None[m
+[32m+[m[32m        return int(p.port is not None)[m
+     except ValueError:[m
+[31m-        has_port = True[m
+[32m+[m[32m        return 0[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef extract_features(url):[m
+[32m+[m[32m    url = str(url).strip()[m
+[32m+[m[32m    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):[m
+[32m+[m[32m        url = "http://" + url[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        p = urlparse(url)[m
+[32m+[m[32m        host = (p.hostname or "").lower()[m
+[32m+[m[32m    except ValueError:[m
+[32m+[m[32m        p, host = urlparse("http://invalid"), ""[m
+[32m+[m
+[32m+[m[32m    path, query = p.path or "", p.query or ""[m
+[32m+[m[32m    parts = [x for x in host.split(".") if x][m
+[32m+[m[32m    tld = parts[-1] if parts else ""[m
+[32m+[m[32m    domain = parts[-2] if len(parts) >= 2 else host[m
+[32m+[m[32m    subdomains = parts[:-2] if len(parts) > 2 else [][m
+[32m+[m[32m    lowered = url.lower()[m
+[32m+[m
+     return {[m
+         "url_length": len(url),[m
+         "host_length": len(host),[m
+         "path_length": len(path),[m
+         "query_length": len(query),[m
+[31m-        "dots": url.count("."),[m
+[31m-        "host_hyphens": host.count("-"),[m
+[31m-        "underscores": url.count("_"),[m
+[31m-        "at_symbol": int("@" in url),[m
+[32m+[m[32m        "num_dots": url.count("."),[m
+[32m+[m[32m        "num_hyphens": url.count("-"),[m
+[32m+[m[32m        "num_hyphens_host": host.count("-"),[m
+[32m+[m[32m        "num_underscores": url.count("_"),[m
+[32m+[m[32m        "num_slashes": url.count("/"),[m
+[32m+[m[32m        "num_at": url.count("@"),[m
+[32m+[m[32m        "num_question": url.count("?"),[m
+[32m+[m[32m        "num_equals": url.count("="),[m
+[32m+[m[32m        "num_ampersand": url.count("&"),[m
+[32m+[m[32m        "num_percent": url.count("%"),[m
+[32m+[m[32m        "num_digits": sum(c.isdigit() for c in url),[m
+         "digit_ratio": sum(c.isdigit() for c in url) / max(len(url), 1),[m
+[31m-        "slashes": url.count("/"),[m
+[31m-        "ampersands": url.count("&"),[m
+[31m-        "percent": url.count("%"),[m
+[31m-        "equals": url.count("="),[m
+[31m-        "is_ip": int(bool(IP_RE.match(host))),[m
+[31m-        "subdomains": subdomain_count(host),[m
+[31m-        "punycode": int("xn--" in host),[m
+[31m-        "keywords_host": sum(k in host for k in KEYWORDS),[m
+[31m-        "keywords_path": sum(k in tail for k in KEYWORDS),[m
+[31m-        "shortener": int(reg_domain(host) in SHORTENERS),[m
+[31m-        "host_entropy": entropy(host),[m
+[31m-        "path_depth": path.count("/"),[m
+[31m-        "has_port": int(has_port),[m
+[31m-        "double_slash_path": int("//" in path),[m
+[31m-        "tld_in_subdomain": int(bool(re.search(r"\.(com|net|org|gov|edu)\.", host))),[m
+[32m+[m[32m        "num_subdomains": len(subdomains),[m
+[32m+[m[32m        "has_ip_host": int(bool(IP_RE.match(host))),[m
+[32m+[m[32m        "is_https": int(p.scheme == "https"),[m
+[32m+[m[32m        "has_port": _has_port(p),[m
+[32m+[m[32m        "is_shortener": int(host in SHORTENERS),[m
+[32m+[m[32m        "suspicious_tld": int(tld in SUSPICIOUS_TLDS),[m
+[32m+[m[32m        "suspicious_word_count": sum(w in lowered for w in SUSPICIOUS_WORDS),[m
+[32m+[m[32m        "brand_in_subdomain": int(any(w in ".".join(subdomains) for w in ("paypal", "apple", "amazon", "google", "microsoft", "bank"))),[m
+[32m+[m[32m        "double_slash_in_path": int("//" in path),[m
+[32m+[m[32m        "domain_entropy": _entropy(domain),[m
+[32m+[m[32m        "url_entropy": _entropy(url),[m
+[32m+[m[32m        "longest_digit_run": max((len(m) for m in re.findall(r"\d+", host)), default=0),[m
+[32m+[m[32m        "has_punycode": int("xn--" in host),[m
+     }[m
+\ No newline at end of file[m
+[1mdiff --git a/static/index.html b/static/index.html[m
+[1mindex 3723290..8b35580 100644[m
+[1m--- a/static/index.html[m
+[1m+++ b/static/index.html[m
+[36m@@ -1,469 +1,244 @@[m
+[31m-<!DOCTYPE html>[m
+[31m-<html lang="en" data-theme="light">[m
+[32m+[m[32m<!doctype html>[m
+[32m+[m[32m<html lang="en">[m
+ <head>[m
+[31m-<meta charset="UTF-8">[m
+[31m-<meta name="viewport" content="width=device-width, initial-scale=1">[m
+[31m-<title>PhishScan</title>[m
+[32m+[m[32m<meta charset="utf-8">[m
+[32m+[m[32m<meta name="viewport" content="width=device-width,initial-scale=1">[m
+[32m+[m[32m<title>Phishing URL Detector</title>[m
+ <link rel="preconnect" href="https://fonts.googleapis.com">[m
+ <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>[m
+[31m-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800&display=swap" rel="stylesheet">[m
+[31m-<script>[m
+[31m-(function () {[m
+[31m-  var t = null;[m
+[31m-  try { t = localStorage.getItem("phishscan-theme"); } catch (e) {}[m
+[31m-  if (t !== "light" && t !== "dark") {[m
+[31m-    t = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";[m
+[31m-  }[m
+[31m-  document.documentElement.setAttribute("data-theme", t);[m
+[31m-})();[m
+[31m-</script>[m
+[32m+[m[32m<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">[m
+ <style>[m
+[31m-:root{[m
+[31m-  color-scheme:light;[m
+[31m-  --primary:#266e27;--secondary:#73e877;[m
+[31m-  --font-head:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;[m
+[31m-  --font-body:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;[m
+[31m-  --bg:#f4f5f4;--card:#ffffff;--text:#1c2430;--muted:#5f6b7a;--line:#e1e5e1;--th:#f7f8f7;[m
+[31m-  --accent:var(--primary);--heading:var(--primary);[m
+[31m-  --btn:var(--primary);--btn-text:#ffffff;[m
+[31m-  --head-bg:var(--primary);--head-text:#ffffff;--head-border:rgba(255,255,255,.45);[m
+[31m-  --brand-span:#ffffff;--brand-span-opacity:.8;[m
+[31m-  --tab-text:rgba(255,255,255,.88);--tab-hover:rgba(255,255,255,.14);[m
+[31m-  --tab-active-bg:#ffffff;--tab-active-text:var(--primary);[m
+[31m-  --safe:#1b8a5a;--warn:#c27a0a;--bad:#c93c3c;--grey:#5b6b82;[m
+[31m-  --safe-fg:#1b8a5a;--warn-fg:#c27a0a;--bad-fg:#c93c3c;--grey-fg:#5b6b82;[m
+[31m-  --note-bg:#fff7e6;--note-line:#f1d9a5;--note-text:#5a4410[m
+[31m-}[m
+[31m-:root[data-theme="dark"]{[m
+[31m-  color-scheme:dark;[m
+[31m-  --bg:#0c110d;--card:#141b16;--text:#e8f1e9;--muted:#9bb09d;--line:#25332a;--th:#19231c;[m
+[31m-  --accent:var(--secondary);--heading:var(--secondary);[m
+[31m-  --btn:var(--secondary);--btn-text:#0d2a0f;[m
+[31m-  --head-bg:#101712;--head-text:#e8f1e9;--head-border:#2f4034;[m
+[31m-  --brand-span:var(--secondary);--brand-span-opacity:1;[m
+[31m-  --tab-text:#c4d4c6;--tab-hover:rgba(255,255,255,.08);[m
+[31m-  --tab-active-bg:var(--secondary);--tab-active-text:#0d2a0f;[m
+[31m-  --safe-fg:#3ecf94;--warn-fg:#f0b050;--bad-fg:#f27a7a;--grey-fg:#9aa9be;[m
+[31m-  --note-bg:#2b2412;--note-line:#5a4a1d;--note-text:#f3dfae[m
+[31m-}[m
+ *{box-sizing:border-box}[m
+[31m-body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font-body);line-height:1.55;transition:background .2s,color .2s}[m
+[31m-header{position:sticky;top:0;z-index:10;background:var(--head-bg);color:var(--head-text);border-bottom:1px solid var(--line);box-shadow:0 2px 8px rgba(0,0,0,.12)}[m
+[31m-.bar-inner{max-width:960px;margin:0 auto;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}[m
+[31m-.brand{font-family:var(--font-head);font-weight:800;font-size:22px;letter-spacing:-.01em}[m
+[31m-.brand span{color:var(--brand-span);opacity:var(--brand-span-opacity)}[m
+[31m-.right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}[m
+[31m-nav{display:flex;gap:6px}[m
+[31m-button.tab{font-family:var(--font-head);padding:8px 16px;border:0;border-radius:8px;background:transparent;color:var(--tab-text);font-size:15px;font-weight:600;cursor:pointer}[m
+[31m-button.tab:hover{background:var(--tab-hover)}[m
+[31m-button.tab.active{background:var(--tab-active-bg);color:var(--tab-active-text)}[m
+[31m-button.theme{font-family:var(--font-head);padding:8px 14px;border:1px solid var(--head-border);border-radius:8px;background:transparent;color:var(--head-text);font-size:14px;font-weight:600;cursor:pointer}[m
+[31m-button.theme:hover{background:var(--tab-hover)}[m
+[31m-main{max-width:860px;margin:0 auto;padding:32px 16px 64px}[m
+[31m-.page{display:none}[m
+[31m-.page.active{display:block}[m
+[31m-h1,h2,h3{font-family:var(--font-head)}[m
+[31m-h1{margin:0 0 8px;color:var(--heading);font-weight:800;letter-spacing:-.02em}[m
+[31m-h2{font-size:19px;margin:32px 0 12px;color:var(--heading);font-weight:700}[m
+[31m-.sub,.muted{color:var(--muted)}[m
+[31m-.hero{text-align:center;padding:40px 0 24px}[m
+[31m-.hero h1{font-size:40px;line-height:1.15}[m
+[31m-.hero p{max-width:600px;margin:12px auto 24px;font-size:18px;color:var(--muted)}[m
+[31m-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-top:24px}[m
+[31m-.row{display:flex;gap:8px;margin:20px 0 8px}[m
+[31m-input{flex:1;padding:12px 14px;border:1px solid var(--line);border-radius:8px;font-size:16px;background:var(--card);color:var(--text)}[m
+[31m-input::placeholder{color:var(--muted)}[m
+[31m-input:focus{outline:2px solid var(--accent);outline-offset:1px}[m
+[31m-button.primary{font-family:var(--font-head);padding:12px 22px;border:0;border-radius:8px;background:var(--btn);color:var(--btn-text);font-size:16px;font-weight:600;cursor:pointer}[m
+[31m-button.primary:hover{filter:brightness(1.1)}[m
+[31m-button.primary:disabled{opacity:.6;cursor:wait}[m
+[31m-.card{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:20px;margin-top:16px}[m
+[31m-.grid .card{margin-top:0}[m
+[31m-.card h3{margin:0 0 6px;font-size:17px;color:var(--text);font-weight:700}[m
+[31m-.card p{margin:0;color:var(--muted);font-size:15px}[m
+[31m-.card.phishing{border-left:6px solid var(--bad)}[m
+[31m-.card.suspicious{border-left:6px solid var(--warn)}[m
+[31m-.card.likely_safe{border-left:6px solid var(--safe)}[m
+[31m-.card.inconclusive{border-left:6px solid var(--grey)}[m
+[31m-.verdict{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;font-family:var(--font-head);font-weight:800;font-size:26px;line-height:1.2}[m
+[31m-.verdict.phishing{color:var(--bad-fg)}.verdict.suspicious{color:var(--warn-fg)}.verdict.likely_safe{color:var(--safe-fg)}.verdict.inconclusive{color:var(--grey-fg)}[m
+[31m-.score{font-size:15px;color:var(--text);font-weight:600}[m
+[31m-.score small{color:var(--muted);font-weight:500}[m
+[31m-.bar{height:10px;background:var(--line);border-radius:5px;margin:12px 0 8px;overflow:hidden}[m
+[31m-.fill{height:100%}[m
+[31m-.fill.phishing{background:var(--bad)}.fill.suspicious{background:var(--warn)}.fill.likely_safe{background:var(--safe)}.fill.inconclusive{background:var(--grey)}[m
+[31m-.guide{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-bottom:12px}[m
+[31m-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px}[m
+[31m-.dot.g{background:var(--safe)}.dot.y{background:var(--warn)}.dot.r{background:var(--bad)}[m
+[31m-.summary{font-size:16px}[m
+[31m-.breakdown{margin-top:8px;font-size:13px;color:var(--muted)}[m
+[31m-.domainbox{margin-top:6px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--th);font-size:14px}[m
+[31m-.domainbox div+div{margin-top:4px}[m
+[31m-.domainbox .age{font-weight:700}[m
+[31m-.domainbox .age.new{color:var(--bad-fg)}[m
+[31m-.domainbox .age.young{color:var(--warn-fg)}[m
+[31m-.domainbox .age.old{color:var(--safe-fg)}[m
+[31m-.finding{border-top:1px solid var(--line);padding:12px 0}[m
+[31m-.finding:first-of-type{border-top:0}[m
+[31m-.ftitle{display:flex;gap:8px;align-items:center;font-weight:600}[m
+[31m-.pill{font-size:11px;text-transform:uppercase;padding:2px 8px;border-radius:99px;color:#fff;letter-spacing:.04em}[m
+[31m-.pill.high{background:var(--bad)}.pill.medium{background:var(--warn)}.pill.low{background:var(--grey)}.pill.info{background:var(--safe)}[m
+[31m-.pts{margin-left:auto;color:var(--muted);font-weight:500}[m
+[31m-.fdetail{color:var(--muted);font-size:14px;margin-top:2px}[m
+[31m-.cat{font-size:12px;color:var(--muted);text-transform:uppercase;margin-top:4px}[m
+[31m-.okrow{display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-top:1px solid var(--line);font-size:15px}[m
+[31m-.okrow:first-of-type{border-top:0}[m
+[31m-.check{color:var(--safe-fg);font-weight:800}[m
+[31m-.cardtitle{display:block;margin-bottom:6px;font-family:var(--font-head);font-size:17px}[m
+[31m-table{width:100%;border-collapse:collapse;background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:14px}[m
+[31m-th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);word-break:break-all}[m
+[31m-th{background:var(--th);color:var(--muted);font-weight:600}[m
+[31m-.note{background:var(--note-bg);border:1px solid var(--note-line);color:var(--note-text);border-radius:8px;padding:10px 12px;margin-top:10px;font-size:14px}[m
+[31m-.legend{display:grid;gap:10px;margin-top:8px}[m
+[31m-.legend div{display:flex;gap:10px;align-items:baseline}[m
+[31m-.legend strong{min-width:190px}[m
+[31m-.c-bad{color:var(--bad-fg)}.c-warn{color:var(--warn-fg)}.c-safe{color:var(--safe-fg)}.c-grey{color:var(--grey-fg)}[m
+[31m-ul{margin:8px 0 0;padding-left:20px;color:var(--muted)}[m
+[31m-li{margin:4px 0}[m
+[31m-footer{text-align:center;color:var(--muted);font-size:13px;padding:0 16px 32px}[m
+[32m+[m[32mbody{[m
+[32m+[m[32m  margin:0;min-height:100vh;color:#fff;[m
+[32m+[m[32m  font-family:'Plus Jakarta Sans',system-ui,-apple-system,Segoe UI,sans-serif;[m
+[32m+[m[32m  background:[m
+[32m+[m[32m    radial-gradient(ellipse 80% 48% at 50% 26%,#2b61d4 0%,#1e48a8 30%,#0b1a48 62%,transparent 88%),[m
+[32m+[m[32m    radial-gradient(ellipse 62% 30% at 50% 82%,rgba(37,99,235,.55) 0%,transparent 72%),[m
+[32m+[m[32m    #01030a;[m
+[32m+[m[32m  background-repeat:no-repeat;[m
+[32m+[m[32m}[m
+[32m+[m[32mmain{max-width:1100px;margin:0 auto;padding:72px 20px 90px}[m
+[32m+[m[32mh1{[m
+[32m+[m[32m  margin:0 0 14px;text-align:center;font-weight:700;[m
+[32m+[m[32m  font-size:clamp(2.1rem,5.6vw,4.2rem);letter-spacing:-.02em;line-height:1.1;[m
+[32m+[m[32m}[m
+[32m+[m[32m.sub{[m
+[32m+[m[32m  margin:0 0 52px;text-align:center;color:#a9b8da;font-weight:500;[m
+[32m+[m[32m  font-size:clamp(.95rem,1.6vw,1.2rem);[m
+[32m+[m[32m}[m
+[32m+[m[32m.shell{[m
+[32m+[m[32m  padding:18px;margin-bottom:26px;border-radius:28px;[m
+[32m+[m[32m  background:rgba(255,255,255,.045);[m
+[32m+[m[32m  border:1px solid rgba(140,175,255,.18);[m
+[32m+[m[32m}[m
+[32m+[m[32m.card{[m
+[32m+[m[32m  background:#000;border-radius:22px;padding:26px;[m
+[32m+[m[32m  border:1px solid rgba(255,255,255,.06);[m
+[32m+[m[32m}[m
+[32m+[m[32m#u{[m
+[32m+[m[32m  display:block;width:100%;background:none;border:0;outline:none;[m
+[32m+[m[32m  color:#fff;caret-color:#fff;font:inherit;font-weight:500;[m
+[32m+[m[32m  font-size:clamp(1.05rem,2vw,1.55rem);padding:8px 0;[m
+[32m+[m[32m}[m
+[32m+[m[32m#u::placeholder{color:#5f6675}[m
+[32m+[m[32m.bar{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-top:26px}[m
+[32m+[m[32m.tab{[m
+[32m+[m[32m  display:inline-flex;align-items:center;gap:10px;[m
+[32m+[m[32m  padding:13px 22px;border-radius:999px;font:inherit;font-weight:500;font-size:1.05rem;[m
+[32m+[m[32m  color:#fff;background:linear-gradient(180deg,#1a3a8c,#0f2663);border:1px solid #2f5fd4;[m
+[32m+[m[32m  cursor:default;[m
+[32m+[m[32m}[m
+[32m+[m[32m.tab svg{width:18px;height:18px}[m
+[32m+[m[32m.send{[m
+[32m+[m[32m  margin-left:auto;width:56px;height:56px;border-radius:50%;cursor:pointer;[m
+[32m+[m[32m  display:grid;place-items:center;color:#fff;[m
+[32m+[m[32m  background:linear-gradient(180deg,#1d44a3,#0f2766);border:1px solid #2f5fd4;[m
+[32m+[m[32m}[m
+[32m+[m[32m.send svg{width:22px;height:22px}[m
+[32m+[m[32m.send:disabled{opacity:.55;cursor:wait}[m
+[32m+[m[32m#msg{min-height:22px;margin:16px 4px 0;color:#a9b8da;font-size:.95rem;line-height:1.5}[m
+[32m+[m[32m#msg.err{color:#f2a1a1}[m
+[32m+[m[32m.head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:22px}[m
+[32m+[m[32m.head h2{margin:0;font-size:1.6rem;font-weight:700}[m
+[32m+[m[32m.head .btns{display:flex;align-items:center;gap:14px}[m
+[32m+[m[32m.round{[m
+[32m+[m[32m  width:64px;height:48px;border-radius:999px;cursor:pointer;display:grid;place-items:center;color:#fff;[m
+[32m+[m[32m  background:linear-gradient(180deg,#1d44a3,#0f2766);border:1px solid #2f5fd4;[m
+[32m+[m[32m}[m
+[32m+[m[32m.round svg{width:22px;height:22px}[m
+[32m+[m[32m.all{[m
+[32m+[m[32m  display:inline-flex;align-items:center;gap:10px;cursor:pointer;[m
+[32m+[m[32m  padding:0 26px;height:56px;border-radius:999px;font:inherit;font-weight:600;font-size:1.1rem;color:#fff;[m
+[32m+[m[32m  background:linear-gradient(180deg,#2a62d8,#1b45ad);border:1px solid #3d72e6;[m
+[32m+[m[32m}[m
+[32m+[m[32m.all svg{width:20px;height:20px}[m
+[32m+[m[32m.wrap{overflow-x:auto}[m
+[32m+[m[32mtable{width:100%;min-width:680px;border-collapse:collapse}[m
+[32m+[m[32mth{[m
+[32m+[m[32m  text-align:left;padding:18px 14px;color:#8c8c95;font-weight:600;font-size:1.05rem;[m
+[32m+[m[32m  border-top:1px solid rgba(255,255,255,.08);border-bottom:1px solid rgba(255,255,255,.08);[m
+[32m+[m[32m}[m
+[32m+[m[32mtd{padding:16px 14px;font-size:1.1rem;color:#ececf0;border-bottom:1px solid rgba(255,255,255,.07)}[m
+[32m+[m[32mtr:last-child td{border-bottom:0}[m
+[32m+[m[32m.cat{display:flex;align-items:center;gap:14px;white-space:nowrap}[m
+[32m+[m[32m.cb{width:24px;height:24px;border-radius:6px;border:2px solid #d4d4da;flex:none}[m
+[32m+[m[32m.asset{max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}[m
+[32m+[m[32m.date{white-space:nowrap}[m
+[32m+[m[32m.status{[m
+[32m+[m[32m  display:inline-block;padding:11px 20px;border-radius:999px;font-weight:600;font-size:.95rem;letter-spacing:.02em;[m
+[32m+[m[32m}[m
+[32m+[m[32m.status.safe{background:#233a1b;border:1px solid #3b5a2a;color:#bfe8a6}[m
+[32m+[m[32m.status.warn{background:#3a2b0f;border:1px solid #7a5a22;color:#f3d9a4}[m
+[32m+[m[32m.status.bad{background:#3a1013;border:1px solid #7a2227;color:#f3b9b9}[m
+[32m+[m[32m.empty{padding:34px 14px;color:#8c8c95;font-size:1.05rem}[m
+[32m+[m[32mbutton:focus-visible,#u:focus-visible{outline:2px solid #6c9bff;outline-offset:3px}[m
+[32m+[m[32m@media(max-width:640px){[m
+[32m+[m[32m  main{padding-top:48px}[m
+[32m+[m[32m  .card{padding:20px}[m
+[32m+[m[32m  .head{flex-wrap:wrap}[m
+[32m+[m[32m}[m
+ </style>[m
+ </head>[m
+ <body>[m
+[31m-<header>[m
+[31m-<div class="bar-inner">[m
+[31m-<div class="brand">Phish<span>Scan</span></div>[m
+[31m-<div class="right">[m
+[31m-<nav>[m
+[31m-<button class="tab active" data-go="home">Home</button>[m
+[31m-<button class="tab" data-go="analyze">Analyze</button>[m
+[31m-<button class="tab" data-go="about">About</button>[m
+[31m-</nav>[m
+[31m-<button id="theme" class="theme" type="button" aria-label="Switch to dark mode">🌙 Dark</button>[m
+[31m-</div>[m
+[31m-</div>[m
+[31m-</header>[m
+[31m-[m
+ <main>[m
+[31m-<section id="page-home" class="page active">[m
+[31m-<div class="hero">[m
+[31m-<h1>Is this website fake or real?</h1>[m
+[31m-<p>PhishScan checks the address, the domain and what the page actually does, then tells you whether it looks fake or legitimate, and exactly why.</p>[m
+[31m-<button class="primary" data-go="analyze">Start analyzing</button>[m
+[31m-</div>[m
+[31m-<div class="grid">[m
+[31m-<div class="card"><h3>1. The link</h3><p>Checks the structure of the URL for tricks such as IP addresses, look-alike characters, shorteners and brand names in the wrong place.</p></div>[m
+[31m-<div class="card"><h3>2. The domain</h3><p>Looks at how old the domain is, whether its certificate is valid, and whether the link redirects somewhere else.</p></div>[m
+[31m-<div class="card"><h3>3. The page</h3><p>Reads the page itself: where password forms send data, whether it imitates a known brand, hidden frames and disguised code.</p></div>[m
+[31m-</div>[m
+[31m-<div class="card">[m
+[31m-<h3>Why not just click the web address?</h3>[m
+[31m-<p>Phishing pages often sit on real, trusted domains, such as hacked websites and free hosting. So a safe-looking address is never enough. PhishScan weighs what the page does, and every point of the score comes with a reason you can read.</p>[m
+[31m-</div>[m
+[31m-</section>[m
+[31m-[m
+[31m-<section id="page-analyze" class="page">[m
+[31m-<h1>Analyze a link</h1>[m
+[31m-<p class="sub">Paste a web address. The page is downloaded as text only; nothing on it is run. Nothing you check is saved.</p>[m
+[31m-<div class="row">[m
+[31m-<input id="url" type="text" placeholder="https://example.com/login" autocomplete="off" spellcheck="false">[m
+[31m-<button id="scan" class="primary">Analyze</button>[m
+[31m-</div>[m
+[31m-<div id="status" class="muted"></div>[m
+[31m-<div id="result"></div>[m
+[31m-</section>[m
+[31m-[m
+[31m-<section id="page-about" class="page">[m
+[31m-<h1>About PhishScan</h1>[m
+[31m-<p class="sub">A phishing website detection system that combines machine learning with evidence from the page itself.</p>[m
+[31m-[m
+[31m-<div class="card">[m
+[31m-<h3>How it decides</h3>[m
+[31m-<ul>[m
+[31m-<li>A machine learning model scores the structure of the URL. It contributes at most 25 points.</li>[m
+[31m-<li>Domain checks look at domain age, certificate validity and redirects.</li>[m
+[31m-<li>Page checks look at password forms, brand impersonation, hidden iframes and obfuscated code.</li>[m
+[31m-<li>Every warning sign adds points to a risk score from 0 to 100, and every point is listed with its reason.</li>[m
+[31m-<li>The score is a rule-based risk estimate, not a probability. The URL model's percentage is a pattern score, not the chance that a site is fake.</li>[m
+[31m-<li>A page is called fake only when the score is high and the evidence comes from more than one layer, or from two strong findings on the page itself.</li>[m
+[31m-<li>If the page cannot be opened, the result rests on the link and domain alone and says so.</li>[m
+[31m-</ul>[m
+[31m-</div>[m
+[31m-[m
+[31m-<div class="card">[m
+[31m-<h3>What the results mean</h3>[m
+[31m-<div class="legend">[m
+[31m-<div><strong class="c-bad">Fake website (phishing)</strong><span class="muted">Strong evidence from several checks. Do not enter any information.</span></div>[m
+[31m-<div><strong class="c-warn">Suspicious website</strong><span class="muted">Some warning signs, but not enough to be sure. Be careful.</span></div>[m
+[31m-<div><strong class="c-safe">Looks legitimate</strong><span class="muted">No strong warning signs found. This is not a guarantee.</span></div>[m
+[31m-<div><strong class="c-grey">Could not decide</strong><span class="muted">The page could not be opened and the link and domain alone were not enough.</span></div>[m
+[31m-</div>[m
+[31m-<p style="margin-top:12px">Risk score: 0 to 29 is low risk, 30 to 59 is medium risk, and 60 to 100 is high risk.</p>[m
+[31m-</div>[m
+[31m-[m
+[31m-<div class="card">[m
+[31m-<h3>Your privacy</h3>[m
+[31m-<ul>[m
+[31m-<li>PhishScan does not keep any history of the links people check. Nothing is saved to a database, and no list of past checks is shown.</li>[m
+[31m-<li>The link you enter is sent to the server so it can be analyzed, and the server visits that page.</li>[m
+[31m-<li>The result stays on screen only until you check another link or refresh the page.</li>[m
+[31m-<li>The only thing saved on your device is your light or dark mode choice.</li>[m
+[31m-</ul>[m
+[31m-</div>[m
+[31m-[m
+[31m-<div class="card">[m
+[31m-<h3>Limitations</h3>[m
+[31m-<ul>[m
+[31m-<li>Pages that build their content with JavaScript show less evidence, because only the raw page text is read.</li>[m
+[31m-<li>Some sites refuse automated visitors, so only the link and domain can be checked.</li>[m
+[31m-<li>Some phishing kits show a harmless page to automated visitors.</li>[m
+[31m-<li>Some domain endings do not publish registration dates, so the domain age may be unavailable.</li>[m
+[31m-<li>The scoring weights are hand-tuned and are checked against test data, not proven.</li>[m
+[31m-<li>A "Looks legitimate" result lowers risk but never removes it.</li>[m
+[31m-</ul>[m
+[31m-</div>[m
+[31m-[m
+[31m-<h2>Model performance (URL model)</h2>[m
+[31m-<table id="metrics"><thead><tr><th>Model</th><th>Accuracy</th><th>Precision</th><th>Recall</th><th>F1</th></tr></thead><tbody></tbody></table>[m
+[31m-</section>[m
+[32m+[m[32m  <h1>Scan And Detect Phishing Links</h1>[m
+[32m+[m[32m  <p class="sub">Analyze any URL with a machine learning model trained on real phishing data</p>[m
+[32m+[m
+[32m+[m[32m  <section class="shell">[m
+[32m+[m[32m    <div class="card">[m
+[32m+[m[32m      <input id="u" type="text" autocomplete="off" spellcheck="false" placeholder="http://example.com/login" autofocus>[m
+[32m+[m[32m      <div class="bar">[m
+[32m+[m[32m        <span class="tab">[m
+[32m+[m[32m          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>[m
+[32m+[m[32m          URL Scan[m
+[32m+[m[32m        </span>[m
+[32m+[m[32m        <button class="send" id="send" type="button" aria-label="Scan">[m
+[32m+[m[32m          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>[m
+[32m+[m[32m        </button>[m
+[32m+[m[32m      </div>[m
+[32m+[m[32m      <div id="msg"></div>[m
+[32m+[m[32m    </div>[m
+[32m+[m[32m  </section>[m
+[32m+[m
+[32m+[m[32m  <section class="shell">[m
+[32m+[m[32m    <div class="card">[m
+[32m+[m[32m      <div class="head">[m
+[32m+[m[32m        <h2>Recent Scans</h2>[m
+[32m+[m[32m        <div class="btns">[m
+[32m+[m[32m          <button class="round" id="clear" type="button" title="Clear recent scans" aria-label="Clear recent scans">[m
+[32m+[m[32m            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>[m
+[32m+[m[32m          </button>[m
+[32m+[m[32m          <button class="all" id="all" type="button">[m
+[32m+[m[32m            <span id="allText">View All Scans</span>[m
+[32m+[m[32m            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>[m
+[32m+[m[32m          </button>[m
+[32m+[m[32m        </div>[m
+[32m+[m[32m      </div>[m
+[32m+[m[32m      <div class="wrap">[m
+[32m+[m[32m        <table>[m
+[32m+[m[32m          <thead><tr>[m
+[32m+[m[32m            <th>Category</th><th>Data Asset</th><th>Last Scanned On</th>[m
+[32m+[m[32m            <th title="Phishing risk out of 10">Score</th><th>Status</th>[m
+[32m+[m[32m          </tr></thead>[m
+[32m+[m[32m          <tbody id="rows"></tbody>[m
+[32m+[m[32m        </table>[m
+[32m+[m[32m      </div>[m
+[32m+[m[32m    </div>[m
+[32m+[m[32m  </section>[m
+ </main>[m
+ [m
+[31m-<footer>PhishScan, a final year project. For education and research.</footer>[m
+[31m-[m
+ <script>[m
+[31m-const $ = (id) => document.getElementById(id);[m
+[31m-const el = (tag, cls, text) => {[m
+[31m-  const n = document.createElement(tag);[m
+[31m-  if (cls) n.className = cls;[m
+[31m-  if (text !== undefined) n.textContent = text;[m
+[31m-  return n;[m
+[31m-};[m
+[31m-const HEADLINES = {[m
+[31m-  phishing: "🚫 Fake website (phishing)",[m
+[31m-  suspicious: "⚠️ Suspicious website",[m
+[31m-  likely_safe: "✅ Looks legitimate",[m
+[31m-  inconclusive: "❔ Could not decide"[m
+[31m-};[m
+[31m-const PAGES = ["home", "analyze", "about"];[m
+[31m-[m
+[31m-function headline(d) {[m
+[31m-  if (d.verdict === "likely_safe" && d.partial) return "✅ Looks legitimate (limited check)";[m
+[31m-  return HEADLINES[d.verdict];[m
+[31m-}[m
+[31m-const THEME_KEY = "phishscan-theme";[m
+[31m-[m
+[31m-function applyTheme(theme) {[m
+[31m-  document.documentElement.setAttribute("data-theme", theme);[m
+[31m-  const btn = $("theme");[m
+[31m-  btn.textContent = theme === "dark" ? "☀️ Light" : "🌙 Dark";[m
+[31m-  btn.setAttribute("aria-label", theme === "dark" ? "Switch to light mode" : "Switch to dark mode");[m
+[31m-}[m
+[31m-[m
+[31m-function toggleTheme() {[m
+[31m-  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";[m
+[31m-  applyTheme(next);[m
+[31m-  try { localStorage.setItem(THEME_KEY, next); } catch (e) { return; }[m
+[31m-}[m
+[31m-[m
+[31m-function show(name) {[m
+[31m-  if (!PAGES.includes(name)) name = "home";[m
+[31m-  PAGES.forEach((p) => $("page-" + p).classList.toggle("active", p === name));[m
+[31m-  document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.go === name));[m
+[31m-  if (location.hash !== "#" + name) location.hash = name;[m
+[31m-  window.scrollTo(0, 0);[m
+[31m-}[m
+[31m-[m
+[31m-function ageText(days) {[m
+[31m-  if (days === null || days === undefined) return "Could not be determined";[m
+[31m-  if (days < 1) return "Registered today";[m
+[31m-  const years = Math.floor(days / 365);[m
+[31m-  const months = Math.floor((days % 365) / 30);[m
+[31m-  const parts = [];[m
+[31m-  if (years) parts.push(years + (years === 1 ? " year" : " years"));[m
+[31m-  if (months) parts.push(months + (months === 1 ? " month" : " months"));[m
+[31m-  if (!years && !months) parts.push(days + (days === 1 ? " day" : " days"));[m
+[31m-  return parts.join(", ");[m
+[31m-}[m
+[31m-[m
+[31m-function createdText(iso) {[m
+[31m-  if (!iso) return "";[m
+[31m-  const d = new Date(iso + "T00:00:00");[m
+[31m-  if (isNaN(d.getTime())) return "";[m
+[31m-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });[m
+[31m-}[m
+[32m+[m[32mconst $ = id => document.getElementById(id);[m
+[32m+[m[32mlet scans = [], showAll = false, busy = false;[m
+ [m
+[31m-function bandText(score) {[m
+[31m-  if (score < 30) return "Low risk";[m
+[31m-  if (score < 60) return "Medium risk";[m
+[31m-  return "High risk";[m
+[31m-}[m
+[31m-[m
+[31m-function breakdownText(b, score) {[m
+[31m-  let t = "Score breakdown: +" + b.warning + " warning points";[m
+[31m-  if (b.trust < 0) t += ", " + b.trust + " trust credit";[m
+[31m-  if (b.warning + b.trust > 100) t += " (capped at 100)";[m
+[31m-  return t + " = " + score + ".";[m
+[31m-}[m
+[32m+[m[32mconst STATUS = {[m
+[32m+[m[32m  phishing:   {cls: 'bad',  text: 'PHISHING',   color: '#ef4444'},[m
+[32m+[m[32m  suspicious: {cls: 'warn', text: 'SUSPICIOUS', color: '#f59e0b'},[m
+[32m+[m[32m  legitimate: {cls: 'safe', text: 'SAFE',       color: '#34c759'}[m
+[32m+[m[32m};[m
+ [m
+[31m-function headings(verdict) {[m
+[31m-  if (verdict === "phishing") return { bad: "Why this site looks fake", good: "Checks that looked normal" };[m
+[31m-  if (verdict === "suspicious") return { bad: "Warning signs found", good: "Checks that looked normal" };[m
+[31m-  if (verdict === "likely_safe") return { bad: "Minor warning signs", good: "Why this site looks legitimate" };[m
+[31m-  return { bad: "Warning signs found", good: "What could be checked" };[m
+[32m+[m[32mfunction esc(s){[m
+[32m+[m[32m  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));[m
+ }[m
+ [m
+[31m-function domainBox(info) {[m
+[31m-  const box = el("div", "domainbox");[m
+[31m-  const name = info && info.name ? info.name : "unknown";[m
+[31m-  box.append(el("div", "", "Domain: " + name));[m
+[31m-  const days = info ? info.age_days : null;[m
+[31m-  const line = el("div", "");[m
+[31m-  line.append(document.createTextNode("Domain age: "));[m
+[31m-  const cls = days === null || days === undefined ? "" : days < 30 ? "new" : days < 180 ? "young" : days >= 730 ? "old" : "";[m
+[31m-  line.append(el("span", "age " + cls, ageText(days)));[m
+[31m-  const created = createdText(info && info.created);[m
+[31m-  if (created) line.append(document.createTextNode(" (registered " + created + ")"));[m
+[31m-  box.append(line);[m
+[31m-    if (days === null || days === undefined) {[m
+[31m-    const reasons = {[m
+[31m-      timeout: "The registration lookup took too long, so the domain age is unknown.",[m
+[31m-      error: "The registration lookup failed, so the domain age is unknown.",[m
+[31m-      unavailable: "This domain ending does not publish registration dates.",[m
+[31m-      not_applicable: "Registration age is not available for raw IP addresses."[m
+[31m-    };[m
+[31m-    box.append(el("div", "muted", reasons[info && info.age_status] || "The domain age could not be determined."));[m
+[31m-  } else if (days < 30) {[m
+[31m-    box.append(el("div", "muted", "Very new domains are a common sign of phishing."));[m
+[32m+[m[32mfunction ring(score, color){[m
+[32m+[m[32m  const n = 10, r = 16, c = 20, gap = 0.16;[m
+[32m+[m[32m  let paths = '';[m
+[32m+[m[32m  for(let i = 0; i < n; i++){[m
+[32m+[m[32m    const a0 = -Math.PI/2 + i*2*Math.PI/n + gap;[m
+[32m+[m[32m    const a1 = -Math.PI/2 + (i+1)*2*Math.PI/n - gap;[m
+[32m+[m[32m    const x0 = c + r*Math.cos(a0), y0 = c + r*Math.sin(a0);[m
+[32m+[m[32m    const x1 = c + r*Math.cos(a1), y1 = c + r*Math.sin(a1);[m
+[32m+[m[32m    const col = i < score ? color : 'rgba(255,214,214,.92)';[m
+[32m+[m[32m    paths += '<path d="M'+x0.toFixed(2)+' '+y0.toFixed(2)+' A'+r+' '+r+' 0 0 1 '+x1.toFixed(2)+' '+y1.toFixed(2)+'" stroke="'+col+'" stroke-width="3.5" stroke-linecap="round" fill="none"/>';[m
+   }[m
+[31m-  return box;[m
+[32m+[m[32m  return '<svg width="44" height="44" viewBox="0 0 40 40">'+paths+[m
+[32m+[m[32m    '<text x="20" y="24.5" text-anchor="middle" font-size="12" font-weight="700" fill="#fff" font-family="inherit">'+score+'</text></svg>';[m
+ }[m
+ [m
+[31m-function domainCard(info) {[m
+[31m-  const card = el("div", "card");[m
+[31m-  card.append(el("strong", "cardtitle", "Website history (domain details)"), domainBox(info));[m
+[31m-  return card;[m
+[31m-}[m
+[31m-[m
+[31m-function findingNode(f) {[m
+[31m-  const row = el("div", "finding");[m
+[31m-  const title = el("div", "ftitle");[m
+[31m-  title.append(el("span", "pill " + f.severity, f.severity), el("span", "", f.title), el("span", "pts", "+" + f.points));[m
+[31m-  row.append(title, el("div", "fdetail", f.detail), el("div", "cat", f.category));[m
+[31m-  return row;[m
+[32m+[m[32mfunction render(){[m
+[32m+[m[32m  const list = showAll ? scans : scans.slice(0, 5);[m
+[32m+[m[32m  $('allText').textContent = showAll ? 'Show Less' : 'View All Scans';[m
+[32m+[m[32m  if(!list.length){[m
+[32m+[m[32m    $('rows').innerHTML = '<tr><td colspan="5" class="empty">No scans yet. Paste a URL above and press Enter.</td></tr>';[m
+[32m+[m[32m    return;[m
+[32m+[m[32m  }[m
+[32m+[m[32m  $('rows').innerHTML = list.map(s => {[m
+[32m+[m[32m    const st = STATUS[s.verdict] || STATUS.legitimate;[m
+[32m+[m[32m    return '<tr>'+[m
+[32m+[m[32m      '<td><div class="cat"><span class="cb"></span>URL Scan</div></td>'+[m
+[32m+[m[32m      '<td><div class="asset" title="'+esc(s.asset)+'">'+esc(s.asset)+'</div></td>'+[m
+[32m+[m[32m      '<td class="date">'+esc(s.date)+'</td>'+[m
+[32m+[m[32m      '<td>'+ring(s.score, st.color)+'</td>'+[m
+[32m+[m[32m      '<td><span class="status '+st.cls+'">'+st.text+'</span></td>'+[m
+[32m+[m[32m    '</tr>';[m
+[32m+[m[32m  }).join('');[m
+ }[m
+ [m
+[31m-function warningCard(heading, items) {[m
+[31m-  const card = el("div", "card");[m
+[31m-  card.append(el("strong", "cardtitle", heading));[m
+[31m-  items.forEach((f) => card.append(findingNode(f)));[m
+[31m-  return card;[m
+[32m+[m[32mfunction addScan(asset, risk, verdict){[m
+[32m+[m[32m  const date = new Date().toLocaleDateString('en-GB', {day:'2-digit', month:'short', year:'numeric'});[m
+[32m+[m[32m  scans.unshift({asset, date, score: Math.round(risk*10), verdict});[m
+[32m+[m[32m  render();[m
+ }[m
+ [m
+[31m-function okCard(heading, items) {[m
+[31m-  const card = el("div", "card");[m
+[31m-  card.append(el("strong", "cardtitle", heading));[m
+[31m-  items.forEach((text) => {[m
+[31m-    const row = el("div", "okrow");[m
+[31m-    row.append(el("span", "check", "✓"), el("span", "", text));[m
+[31m-    card.append(row);[m
+[31m-  });[m
+[31m-  return card;[m
+[32m+[m[32mfunction say(text, isErr){[m
+[32m+[m[32m  $('msg').textContent = text || '';[m
+[32m+[m[32m  $('msg').className = isErr ? 'err' : '';[m
+ }[m
+ [m
+[31m-function render(d) {[m
+[31m-  const box = $("result");[m
+[31m-  box.replaceChildren();[m
+[31m-[m
+[31m-  const head = el("div", "card " + d.verdict);[m
+[31m-  const verdict = el("div", "verdict " + d.verdict);[m
+[31m-  const score = el("span", "score");[m
+[31m-  score.append(document.createTextNode("Risk score " + d.score + "/100 "), el("small", "", "· " + bandText(d.score)));[m
+[31m-  verdict.append(el("span", "", headline(d)), score);[m
+[31m-  const bar = el("div", "bar");[m
+[31m-  const fill = el("div", "fill " + d.verdict);[m
+[31m-  fill.style.width = d.score + "%";[m
+[31m-  bar.append(fill);[m
+[32m+[m[32mfunction setBusy(b){ busy = b; $('send').disabled = b; }[m
+ [m
+[31m-  const guide = el("div", "guide");[m
+[31m-  [["g", "0 to 29 low risk"], ["y", "30 to 59 medium risk"], ["r", "60 to 100 high risk"]].forEach(([c, t]) => {[m
+[31m-    const item = el("span", "");[m
+[31m-    item.append(el("span", "dot " + c), document.createTextNode(t));[m
+[31m-    guide.append(item);[m
+[32m+[m[32masync function analyze(url){[m
+[32m+[m[32m  const r = await fetch('/analyze', {[m
+[32m+[m[32m    method: 'POST',[m
+[32m+[m[32m    headers: {'Content-Type': 'application/json'},[m
+[32m+[m[32m    body: JSON.stringify({url})[m
+   });[m
+[31m-[m
+[31m-  head.append(verdict, bar, guide, el("div", "summary", d.summary), el("div", "breakdown", breakdownText(d.breakdown, d.score)));[m
+[31m-  if (d.page && d.page.final_url) {[m
+[31m-    head.append(el("div", "breakdown", "Final address: " + d.page.final_url));[m
+[31m-    if (d.page.title) head.append(el("div", "breakdown", "Page title: " + d.page.title));[m
+[32m+[m[32m  if(!r.ok) throw new Error('Request failed');[m
+[32m+[m[32m  return r.json();[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32masync function scanUrl(){[m
+[32m+[m[32m  const url = $('u').value.trim();[m
+[32m+[m[32m  if(!url){ say('Enter a URL to scan.', true); return; }[m
+[32m+[m[32m  setBusy(true); say('Analyzing the site. This can take up to 30 seconds...');[m
+[32m+[m[32m  try{[m
+[32m+[m[32m    const d = await analyze(url);[m
+[32m+[m[32m    addScan(url, d.phishing_probability, d.verdict);[m
+[32m+[m[32m    say(d.summary);[m
+[32m+[m[32m  }catch(e){[m
+[32m+[m[32m    say('Could not analyze this URL. Check that the server is running.', true);[m
+   }[m
+[31m-  d.notes.forEach((n) => head.append(el("div", "note", n)));[m
+[31m-  box.append(head);[m
+[31m-[m
+[31m-  const h = headings(d.verdict);[m
+[31m-  const bad = d.findings.length ? warningCard(h.bad, d.findings) : null;[m
+[31m-  const good = d.passed.length ? okCard(h.good, d.passed) : null;[m
+[31m-  const order = d.verdict === "likely_safe" ? [good, bad] : [bad, good];[m
+[31m-  order.forEach((c) => { if (c) box.append(c); });[m
+[31m-[m
+[31m-  box.append(domainCard(d.domain));[m
+[32m+[m[32m  setBusy(false);[m
+ }[m
+ [m
+[31m-async function scan() {[m
+[31m-  const url = $("url").value.trim();[m
+[31m-  if (!url) return;[m
+[31m-  $("scan").disabled = true;[m
+[31m-  $("status").textContent = "Analyzing URL, domain and page content. This can take up to 30 seconds...";[m
+[31m-  $("result").replaceChildren();[m
+[31m-  try {[m
+[31m-    const res = await fetch("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });[m
+[31m-    const text = await res.text();[m
+[31m-    let data = null;[m
+[31m-    try { data = JSON.parse(text); } catch (e) { data = null; }[m
+[31m-    if (!data) {[m
+[31m-      if (res.status === 405 || res.status === 404) throw new Error("This page is not connected to the PhishScan server. Open it from the address where app.py is running (http://127.0.0.1:5000) or from your Render link, not from Live Server.");[m
+[31m-      throw new Error("The server returned an empty or unexpected reply (status " + res.status + "). Wait a moment and try again.");[m
+[31m-    }[m
+[31m-    if (!res.ok) throw new Error(data.error || "Request failed");[m
+[31m-    $("status").textContent = "";[m
+[31m-    render(data);[m
+[31m-  } catch (e) {[m
+[31m-    $("status").textContent = e instanceof TypeError ? "Cannot reach the server. Check your connection and try again." : e.message;[m
+[31m-  }[m
+[31m-  $("scan").disabled = false;[m
+[31m-}[m
+[31m-[m
+[31m-async function loadMetrics() {[m
+[31m-  try {[m
+[31m-    const data = await (await fetch("/api/metrics")).json();[m
+[31m-    const body = $("metrics").querySelector("tbody");[m
+[31m-    body.replaceChildren();[m
+[31m-    Object.entries(data).forEach(([name, m]) => {[m
+[31m-      const tr = el("tr");[m
+[31m-      [name.replace("_", " "), m.accuracy, m.precision, m.recall, m.f1].forEach((v) => tr.append(el("td", "", String(v))));[m
+[31m-      body.append(tr);[m
+[31m-    });[m
+[31m-  } catch (e) {[m
+[31m-    return;[m
+[31m-  }[m
+[31m-}[m
+[31m-[m
+[31m-document.querySelectorAll("[data-go]").forEach((b) => b.addEventListener("click", () => show(b.dataset.go)));[m
+[31m-window.addEventListener("hashchange", () => show(location.hash.slice(1)));[m
+[31m-$("theme").addEventListener("click", toggleTheme);[m
+[31m-$("scan").addEventListener("click", scan);[m
+[31m-$("url").addEventListener("keydown", (e) => { if (e.key === "Enter") scan(); });[m
+[31m-[m
+[31m-if (window.matchMedia) {[m
+[31m-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {[m
+[31m-    let saved = null;[m
+[31m-    try { saved = localStorage.getItem(THEME_KEY); } catch (err) { saved = null; }[m
+[31m-    if (saved !== "light" && saved !== "dark") applyTheme(e.matches ? "dark" : "light");[m
+[31m-  });[m
+[31m-}[m
+[32m+[m[32m$('send').onclick = () => { if(!busy) scanUrl(); };[m
+[32m+[m[32m$('u').addEventListener('keydown', e => { if(e.key === 'Enter' && !busy) scanUrl(); });[m
+[32m+[m[32m$('all').onclick = () => { showAll = !showAll; render(); };[m
+[32m+[m[32m$('clear').onclick = () => { scans = []; showAll = false; render(); say(''); };[m
+ [m
+[31m-applyTheme(document.documentElement.getAttribute("data-theme"));[m
+[31m-$("url").value = "";[m
+[31m-show(location.hash.slice(1) || "home");[m
+[31m-loadMetrics();[m
+[32m+[m[32mrender();[m
+ </script>[m
+ </body>[m
+ </html>[m
+\ No newline at end of file[m

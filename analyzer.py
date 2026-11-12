@@ -306,4 +306,40 @@ def content_findings(soup, html, final_url):
     body_words = re.findall(r"[a-z0-9]+", soup.get_text(" ", strip=True).lower())[:400]
     best, best_score = None, 0
     for brand in BRANDS:
-        s = 3 * title_words.count(brand) + other_term
+        s = 3 * title_words.count(brand) + body_words.count(brand)
+        if s > best_score:
+            best, best_score = brand, s
+    if best and best_score >= 3:
+        official = BRANDS[best]
+        if rd in official:
+            add(out, "trust", "info", -10, f"Page is hosted on an official {best} domain", f"{rd} is a known {best} domain.")
+        elif asks:
+            add(out, "content", "high", 40, f"Page impersonates {best}", f"The page presents itself as {best} and asks for a password or sensitive data, but it is hosted on {rd}, not an official domain ({', '.join(official)}).")
+            assets = [t.get("src") or t.get("href") or "" for t in soup.find_all(["img", "link", "script"])]
+            hot = [a for a in assets if a and reg_domain((urlparse(urljoin(final_url, a)).hostname or "").lower()) in official]
+            if hot:
+                add(out, "content", "medium", 10, f"Loads {best} images or files directly from the real site", f"{len(hot)} resource(s) are hotlinked from the genuine {best} website to make the copy look authentic.")
+
+    if asks and rd in FREE_HOSTS:
+        add(out, "content", "medium", 10, "Credential page on a free hosting platform", f"{rd} lets anyone publish pages. Free hosts are common for short-lived phishing pages.")
+
+    hidden = 0
+    for frame in soup.find_all("iframe"):
+        style = (frame.get("style") or "").replace(" ", "").lower()
+        if "display:none" in style or "visibility:hidden" in style or str(frame.get("width", "")) in ("0", "1") or str(frame.get("height", "")) in ("0", "1"):
+            hidden += 1
+    if hidden:
+        add(out, "content", "medium", 10, "Hidden iframe on the page", f"{hidden} invisible iframe(s) were found. They can load content or track victims without being seen.")
+
+    if re.search(r"oncontextmenu\s*=\s*[\"']?\s*return\s+false", html, re.I):
+        add(out, "content", "low", 6, "Right-click is disabled", "Disabling the context menu is used to stop victims inspecting the page source.")
+
+    if re.search(r"eval\s*\(", html) and re.search(r"atob\s*\(|unescape\s*\(|fromCharCode", html):
+        add(out, "content", "medium", 10, "Obfuscated JavaScript", "The page decodes and executes hidden code (eval combined with atob/unescape/fromCharCode).")
+
+    anchors = [(a.get("href") or "").strip() for a in soup.find_all("a")]
+    if asks and len(anchors) >= 5:
+        dead = sum(1 for h in anchors if h in ("", "#") or h.lower().startswith("javascript:"))
+        if dead / len(anchors) > 0.5:
+            add(out, "content", "medium", 8, "Most links on the page are dead", f"{dead} of {len(anchors)} links go nowhere, typical of a cloned page.")
+    return out
