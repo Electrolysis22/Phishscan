@@ -15,7 +15,7 @@ from features import extract_features, reg_domain
 
 BASE_DIR = Path(__file__).parent
 
-bundle = joblib.load(BASE_DIR / "model" / "model.joblib")l.joblib")
+bundle = joblib.load(BASE_DIR / "model" / "model.joblib")
 model, FEATURES = bundle["model"], bundle["features"]
 app = FastAPI(title="Phishing URL Detector")
 
